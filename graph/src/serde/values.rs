@@ -132,21 +132,13 @@ pub(crate) fn decode_value(data: &[u8]) -> Result<Value, crate::Error> {
 /// Returns `None` for types that cannot be meaningfully sorted (Null, List, Map, etc.).
 pub(crate) fn encode_sortable_value(value: &Value) -> Option<Bytes> {
     match value {
-        Value::Bool(b) => {
-            let mut buf = BytesMut::with_capacity(1);
-            buf.put_u8(if *b { 1 } else { 0 });
-            Some(buf.freeze())
-        }
-        Value::Int64(n) => {
-            let mut buf = BytesMut::with_capacity(8);
-            buf.put_u64(encode_i64_sortable(*n));
-            Some(buf.freeze())
-        }
-        Value::Float64(f) => {
-            let mut buf = BytesMut::with_capacity(8);
-            buf.put_u64(encode_f64_sortable(*f));
-            Some(buf.freeze())
-        }
+        Value::Bool(b) => Some(Bytes::from_static(if *b { &[1] } else { &[0] })),
+        Value::Int64(n) => Some(Bytes::copy_from_slice(
+            &encode_i64_sortable(*n).to_be_bytes(),
+        )),
+        Value::Float64(f) => Some(Bytes::copy_from_slice(
+            &encode_f64_sortable(*f).to_be_bytes(),
+        )),
         Value::String(s) => Some(terminated_bytes::serialize_to_bytes(s.as_bytes())),
         _ => None,
     }
@@ -216,7 +208,7 @@ mod tests {
             Value::Null,
             Value::Bool(true),
             Value::Int64(42),
-            Value::Float64(3.14),
+            Value::Float64(1.23),
             Value::String("hello".into()),
         ];
 
@@ -273,7 +265,7 @@ mod tests {
     #[test]
     fn should_encode_sortable_string_preserving_order() {
         // given
-        let values = vec!["apple", "banana", "cherry"];
+        let values = ["apple", "banana", "cherry"];
 
         // when
         let encoded: Vec<Bytes> = values

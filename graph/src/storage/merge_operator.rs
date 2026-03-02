@@ -57,75 +57,39 @@ mod tests {
     use crate::serde::MetadataSubType;
     use crate::serde::keys::MetadataKey;
 
-    #[test]
-    fn should_merge_counters_additively() {
-        // given
+    fn merge_counter(existing: Option<i64>, delta: i64) -> i64 {
         let op = GraphMergeOperator;
         let key = MetadataKey {
             sub_type: MetadataSubType::NodeCount,
         }
         .encode();
-        let existing = Bytes::copy_from_slice(&10i64.to_le_bytes());
-        let delta = Bytes::copy_from_slice(&5i64.to_le_bytes());
+        let existing = existing.map(|v| Bytes::copy_from_slice(&v.to_le_bytes()));
+        let delta = Bytes::copy_from_slice(&delta.to_le_bytes());
+        let result = op.merge(&key, existing, delta);
+        i64::from_le_bytes(result[..8].try_into().unwrap())
+    }
 
-        // when
-        let result = op.merge(&key, Some(existing), delta);
-
-        // then
-        let merged = i64::from_le_bytes(result[..8].try_into().unwrap());
-        assert_eq!(merged, 15);
+    #[test]
+    fn should_merge_counters_additively() {
+        assert_eq!(merge_counter(Some(10), 5), 15);
     }
 
     #[test]
     fn should_merge_counter_with_no_existing() {
-        // given
-        let op = GraphMergeOperator;
-        let key = MetadataKey {
-            sub_type: MetadataSubType::EdgeCount,
-        }
-        .encode();
-        let delta = Bytes::copy_from_slice(&7i64.to_le_bytes());
-
-        // when
-        let result = op.merge(&key, None, delta);
-
-        // then
-        let merged = i64::from_le_bytes(result[..8].try_into().unwrap());
-        assert_eq!(merged, 7);
+        assert_eq!(merge_counter(None, 7), 7);
     }
 
     #[test]
     fn should_merge_negative_counter_delta() {
-        // given
-        let op = GraphMergeOperator;
-        let key = MetadataKey {
-            sub_type: MetadataSubType::NodeCount,
-        }
-        .encode();
-        let existing = Bytes::copy_from_slice(&10i64.to_le_bytes());
-        let delta = Bytes::copy_from_slice(&(-3i64).to_le_bytes());
-
-        // when
-        let result = op.merge(&key, Some(existing), delta);
-
-        // then
-        let merged = i64::from_le_bytes(result[..8].try_into().unwrap());
-        assert_eq!(merged, 7);
+        assert_eq!(merge_counter(Some(10), -3), 7);
     }
 
     #[test]
     fn should_last_write_wins_for_non_metadata() {
-        // given
         let op = GraphMergeOperator;
-        // Use a node record key (record type 1, not metadata)
         let key = Bytes::from_static(&[0x01, 0x10, 0x00]);
-        let existing = Bytes::from("old");
         let new = Bytes::from("new");
-
-        // when
-        let result = op.merge(&key, Some(existing), new.clone());
-
-        // then
+        let result = op.merge(&key, Some(Bytes::from("old")), new.clone());
         assert_eq!(result, new);
     }
 }

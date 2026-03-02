@@ -10,6 +10,17 @@ use crate::serde::keys::*;
 use crate::serde::values::{self, EdgeRecordValue, FLAG_DELETED, NodeRecordValue};
 use common::storage::{MergeRecordOp, PutRecordOp, Record, RecordOp};
 
+fn put_record(key: Bytes, value: Bytes) -> RecordOp {
+    RecordOp::Put(PutRecordOp::from(Record::new(key, value)))
+}
+
+fn counter_merge(sub_type: MetadataSubType, delta: i64) -> RecordOp {
+    RecordOp::Merge(MergeRecordOp::from(Record::new(
+        MetadataKey { sub_type }.encode(),
+        super::encode_i64_le(delta),
+    )))
+}
+
 impl GraphStoreMut for SlateGraphStore {
     fn create_node(&self, labels: &[&str]) -> NodeId {
         self.create_node_versioned(
@@ -42,10 +53,7 @@ impl GraphStoreMut for SlateGraphStore {
             label_count: labels.len() as u16,
             prop_count: 0,
         };
-        ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-            node_key.encode(),
-            node_val.encode(),
-        ))));
+        ops.push(put_record(node_key.encode(), node_val.encode()));
 
         // Write label index entries
         {
@@ -55,21 +63,11 @@ impl GraphStoreMut for SlateGraphStore {
                 ops.extend(catalog_ops);
 
                 let label_key = LabelIndexKey { label_id, node_id };
-                ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-                    label_key.encode(),
-                    Bytes::new(),
-                ))));
+                ops.push(put_record(label_key.encode(), Bytes::new()));
             }
         }
 
-        // Increment node count via merge
-        let counter_key = MetadataKey {
-            sub_type: MetadataSubType::NodeCount,
-        };
-        ops.push(RecordOp::Merge(MergeRecordOp::from(Record::new(
-            counter_key.encode(),
-            super::encode_i64_le(1),
-        ))));
+        ops.push(counter_merge(MetadataSubType::NodeCount, 1));
 
         // Apply atomically
         let _ = self.exec(async { self.storage.apply(ops).await });
@@ -128,10 +126,7 @@ impl GraphStoreMut for SlateGraphStore {
             flags: 0,
             prop_count: 0,
         };
-        ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-            edge_key.encode(),
-            edge_val.encode(),
-        ))));
+        ops.push(put_record(edge_key.encode(), edge_val.encode()));
 
         // Write forward adjacency
         let fwd_key = ForwardAdjKey {
@@ -139,10 +134,8 @@ impl GraphStoreMut for SlateGraphStore {
             edge_type_id: type_id,
             dst: dst.0,
         };
-        ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-            fwd_key.encode(),
-            Bytes::copy_from_slice(&edge_id.to_le_bytes()),
-        ))));
+        let edge_id_bytes = Bytes::copy_from_slice(&edge_id.to_le_bytes());
+        ops.push(put_record(fwd_key.encode(), edge_id_bytes.clone()));
 
         // Write backward adjacency if enabled
         if self.backward_edges {
@@ -151,20 +144,10 @@ impl GraphStoreMut for SlateGraphStore {
                 edge_type_id: type_id,
                 src: src.0,
             };
-            ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-                bwd_key.encode(),
-                Bytes::copy_from_slice(&edge_id.to_le_bytes()),
-            ))));
+            ops.push(put_record(bwd_key.encode(), edge_id_bytes));
         }
 
-        // Increment edge count
-        let counter_key = MetadataKey {
-            sub_type: MetadataSubType::EdgeCount,
-        };
-        ops.push(RecordOp::Merge(MergeRecordOp::from(Record::new(
-            counter_key.encode(),
-            super::encode_i64_le(1),
-        ))));
+        ops.push(counter_merge(MetadataSubType::EdgeCount, 1));
 
         let _ = self.exec(async { self.storage.apply(ops).await });
 
@@ -217,10 +200,7 @@ impl GraphStoreMut for SlateGraphStore {
             label_count: 0,
             prop_count: 0,
         };
-        ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-            node_key.encode(),
-            node_val.encode(),
-        ))));
+        ops.push(put_record(node_key.encode(), node_val.encode()));
 
         // Delete properties
         if let Ok(records) =
@@ -243,14 +223,7 @@ impl GraphStoreMut for SlateGraphStore {
             }
         }
 
-        // Decrement node count
-        let counter_key = MetadataKey {
-            sub_type: MetadataSubType::NodeCount,
-        };
-        ops.push(RecordOp::Merge(MergeRecordOp::from(Record::new(
-            counter_key.encode(),
-            super::encode_i64_le(-1),
-        ))));
+        ops.push(counter_merge(MetadataSubType::NodeCount, -1));
 
         let _ = self.exec(async { self.storage.apply(ops).await });
         self.node_count.fetch_sub(1, Ordering::Relaxed);
@@ -326,27 +299,22 @@ impl GraphStoreMut for SlateGraphStore {
             flags: FLAG_DELETED,
             ..edge_val.clone()
         };
-        ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-            edge_key.encode(),
-            deleted_val.encode(),
-        ))));
+        ops.push(put_record(edge_key.encode(), deleted_val.encode()));
 
-        // Delete forward adjacency
-        let fwd_key = ForwardAdjKey {
+        // Delete adjacency indexes
+        let fwd = ForwardAdjKey {
             src: edge_val.src,
             edge_type_id: edge_val.type_id,
             dst: edge_val.dst,
         };
-        ops.push(RecordOp::Delete(fwd_key.encode()));
-
-        // Delete backward adjacency
+        ops.push(RecordOp::Delete(fwd.encode()));
         if self.backward_edges {
-            let bwd_key = BackwardAdjKey {
+            let bwd = BackwardAdjKey {
                 dst: edge_val.dst,
                 edge_type_id: edge_val.type_id,
                 src: edge_val.src,
             };
-            ops.push(RecordOp::Delete(bwd_key.encode()));
+            ops.push(RecordOp::Delete(bwd.encode()));
         }
 
         // Delete edge properties
@@ -358,14 +326,7 @@ impl GraphStoreMut for SlateGraphStore {
             }
         }
 
-        // Decrement edge count
-        let counter_key = MetadataKey {
-            sub_type: MetadataSubType::EdgeCount,
-        };
-        ops.push(RecordOp::Merge(MergeRecordOp::from(Record::new(
-            counter_key.encode(),
-            super::encode_i64_le(-1),
-        ))));
+        ops.push(counter_merge(MetadataSubType::EdgeCount, -1));
 
         let _ = self.exec(async { self.storage.apply(ops).await });
         self.edge_count.fetch_sub(1, Ordering::Relaxed);
@@ -382,10 +343,7 @@ impl GraphStoreMut for SlateGraphStore {
             prop_key: Bytes::copy_from_slice(key.as_bytes()),
         };
 
-        let mut ops = vec![RecordOp::Put(PutRecordOp::from(Record::new(
-            prop_key.encode(),
-            value_bytes,
-        )))];
+        let mut ops = vec![put_record(prop_key.encode(), value_bytes)];
 
         // Update property index if the value is sortable
         if let Some(sortable) = values::encode_sortable_value(&value) {
@@ -398,10 +356,7 @@ impl GraphStoreMut for SlateGraphStore {
                 sortable_value: sortable,
                 node_id: id.0,
             };
-            ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-                idx_key.encode(),
-                Bytes::new(),
-            ))));
+            ops.push(put_record(idx_key.encode(), Bytes::new()));
         }
 
         let _ = self.exec(async { self.storage.apply(ops).await });
@@ -417,12 +372,11 @@ impl GraphStoreMut for SlateGraphStore {
             prop_key: Bytes::copy_from_slice(key.as_bytes()),
         };
 
-        let ops = vec![RecordOp::Put(PutRecordOp::from(Record::new(
-            prop_key.encode(),
-            value_bytes,
-        )))];
-
-        let _ = self.exec(async { self.storage.apply(ops).await });
+        let _ = self.exec(async {
+            self.storage
+                .apply(vec![put_record(prop_key.encode(), value_bytes)])
+                .await
+        });
     }
 
     fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
@@ -493,10 +447,7 @@ impl GraphStoreMut for SlateGraphStore {
         }
 
         let mut ops = catalog_ops;
-        ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
-            label_key.encode(),
-            Bytes::new(),
-        ))));
+        ops.push(put_record(label_key.encode(), Bytes::new()));
 
         let _ = self.exec(async { self.storage.apply(ops).await });
         true
