@@ -136,26 +136,27 @@ impl GraphStore for SlateGraphStore {
     fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
         let mut result = Vec::new();
 
-        if matches!(direction, Direction::Outgoing | Direction::Both) {
-            if let Ok(records) = self.exec(async {
+        if matches!(direction, Direction::Outgoing | Direction::Both)
+            && let Ok(records) = self.exec(async {
                 self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await
-            }) {
-                for record in &records {
-                    if let Ok(key) = ForwardAdjKey::decode(&record.key) {
-                        result.push(NodeId(key.dst));
-                    }
+            })
+        {
+            for record in &records {
+                if let Ok(key) = ForwardAdjKey::decode(&record.key) {
+                    result.push(NodeId(key.dst));
                 }
             }
         }
 
-        if self.backward_edges && matches!(direction, Direction::Incoming | Direction::Both) {
-            if let Ok(records) = self.exec(async {
+        if self.backward_edges
+            && matches!(direction, Direction::Incoming | Direction::Both)
+            && let Ok(records) = self.exec(async {
                 self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await
-            }) {
-                for record in &records {
-                    if let Ok(key) = BackwardAdjKey::decode(&record.key) {
-                        result.push(NodeId(key.src));
-                    }
+            })
+        {
+            for record in &records {
+                if let Ok(key) = BackwardAdjKey::decode(&record.key) {
+                    result.push(NodeId(key.src));
                 }
             }
         }
@@ -166,32 +167,33 @@ impl GraphStore for SlateGraphStore {
     fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
         let mut result = Vec::new();
 
-        if matches!(direction, Direction::Outgoing | Direction::Both) {
-            if let Ok(records) = self.exec(async {
+        if matches!(direction, Direction::Outgoing | Direction::Both)
+            && let Ok(records) = self.exec(async {
                 self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await
-            }) {
-                for record in &records {
-                    if let Ok(key) = ForwardAdjKey::decode(&record.key) {
-                        if record.value.len() >= 8 {
-                            let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                            result.push((NodeId(key.dst), EdgeId(edge_id)));
-                        }
-                    }
+            })
+        {
+            for record in &records {
+                if let Ok(key) = ForwardAdjKey::decode(&record.key)
+                    && record.value.len() >= 8
+                {
+                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
+                    result.push((NodeId(key.dst), EdgeId(edge_id)));
                 }
             }
         }
 
-        if self.backward_edges && matches!(direction, Direction::Incoming | Direction::Both) {
-            if let Ok(records) = self.exec(async {
+        if self.backward_edges
+            && matches!(direction, Direction::Incoming | Direction::Both)
+            && let Ok(records) = self.exec(async {
                 self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await
-            }) {
-                for record in &records {
-                    if let Ok(key) = BackwardAdjKey::decode(&record.key) {
-                        if record.value.len() >= 8 {
-                            let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                            result.push((NodeId(key.src), EdgeId(edge_id)));
-                        }
-                    }
+            })
+        {
+            for record in &records {
+                if let Ok(key) = BackwardAdjKey::decode(&record.key)
+                    && record.value.len() >= 8
+                {
+                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
+                    result.push((NodeId(key.src), EdgeId(edge_id)));
                 }
             }
         }
@@ -246,12 +248,12 @@ impl GraphStore for SlateGraphStore {
                             result.push(NodeId(key.node_id));
                         }
                     }
-                } else {
-                    if let Ok(val) = NodeRecordValue::decode(&record.value) {
-                        if !val.is_deleted() {
-                            result.push(NodeId(key.node_id));
-                        }
+                } else if let Ok(val) = NodeRecordValue::decode(&record.value) {
+                    if !val.is_deleted() {
+                        result.push(NodeId(key.node_id));
                     }
+                    last_node_id = Some(key.node_id);
+                } else {
                     last_node_id = Some(key.node_id);
                 }
             }
@@ -372,8 +374,8 @@ impl GraphStore for SlateGraphStore {
             }
         };
 
-        let min_bytes = min.and_then(|v| values::encode_sortable_value(v));
-        let max_bytes = max.and_then(|v| values::encode_sortable_value(v));
+        let min_bytes = min.and_then(values::encode_sortable_value);
+        let max_bytes = max.and_then(values::encode_sortable_value);
 
         let range = PropertyIndexKey::prop_value_range(
             prop_id,
@@ -449,7 +451,7 @@ impl SlateGraphStore {
         let properties = self.load_node_properties(id.0)?;
         let labels = self.load_node_labels(id.0)?;
 
-        let property_map = grafeo_common::types::PropertyMap::from_iter(properties.into_iter());
+        let property_map = grafeo_common::types::PropertyMap::from_iter(properties);
 
         Ok(Some(Node {
             id,
@@ -470,7 +472,7 @@ impl SlateGraphStore {
                 .unwrap_or_else(|| ArcStr::from("UNKNOWN"))
         };
 
-        let property_map = grafeo_common::types::PropertyMap::from_iter(properties.into_iter());
+        let property_map = grafeo_common::types::PropertyMap::from_iter(properties);
 
         Ok(Edge {
             id,
@@ -491,13 +493,13 @@ impl SlateGraphStore {
 
         let mut props = FxHashMap::default();
         for record in &records {
-            if let Ok(key) = NodePropertyKey::decode(&record.key) {
-                if let Ok(val) = values::decode_value(&record.value) {
-                    let prop_key = PropertyKey::new(
-                        std::str::from_utf8(&key.prop_key).unwrap_or(""),
-                    );
-                    props.insert(prop_key, val);
-                }
+            if let Ok(key) = NodePropertyKey::decode(&record.key)
+                && let Ok(val) = values::decode_value(&record.value)
+            {
+                let prop_key = PropertyKey::new(
+                    std::str::from_utf8(&key.prop_key).unwrap_or(""),
+                );
+                props.insert(prop_key, val);
             }
         }
         Ok(props)
@@ -513,13 +515,13 @@ impl SlateGraphStore {
 
         let mut props = FxHashMap::default();
         for record in &records {
-            if let Ok(key) = EdgePropertyKey::decode(&record.key) {
-                if let Ok(val) = values::decode_value(&record.value) {
-                    let prop_key = PropertyKey::new(
-                        std::str::from_utf8(&key.prop_key).unwrap_or(""),
-                    );
-                    props.insert(prop_key, val);
-                }
+            if let Ok(key) = EdgePropertyKey::decode(&record.key)
+                && let Ok(val) = values::decode_value(&record.value)
+            {
+                let prop_key = PropertyKey::new(
+                    std::str::from_utf8(&key.prop_key).unwrap_or(""),
+                );
+                props.insert(prop_key, val);
             }
         }
         Ok(props)
@@ -541,10 +543,10 @@ impl SlateGraphStore {
             }
             .encode();
 
-            if let Ok(Some(_)) = self.exec(async { self.storage.get(key).await }) {
-                if let Some(name) = catalog.get_label_name(label_id) {
-                    labels.push(name.clone());
-                }
+            if let Ok(Some(_)) = self.exec(async { self.storage.get(key).await })
+                && let Some(name) = catalog.get_label_name(label_id)
+            {
+                labels.push(name.clone());
             }
         }
 

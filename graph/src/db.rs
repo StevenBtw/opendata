@@ -12,7 +12,7 @@ use crate::{Config, Result};
 /// High-level graph database backed by SlateDB.
 ///
 /// Wraps [`SlateGraphStore`] and, when the `grafeo-engine` feature is enabled,
-/// provides a [`GrafeoDB`] query engine for GQL/Cypher/etc.
+/// provides a `GrafeoDB` query engine for GQL/Cypher/etc.
 pub struct GraphDb {
     store: Arc<SlateGraphStore>,
     #[cfg(feature = "gql")]

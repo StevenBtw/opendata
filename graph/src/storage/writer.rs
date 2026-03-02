@@ -270,30 +270,30 @@ impl GraphStoreMut for SlateGraphStore {
                 .await
         }) {
             for record in &records {
-                if ForwardAdjKey::decode(&record.key).is_ok() {
-                    if record.value.len() >= 8 {
-                        let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                        self.delete_edge(EdgeId(edge_id));
-                    }
+                if ForwardAdjKey::decode(&record.key).is_ok()
+                    && record.value.len() >= 8
+                {
+                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
+                    self.delete_edge(EdgeId(edge_id));
                 }
             }
         }
 
         // Delete incoming edges
-        if self.backward_edges {
-            if let Ok(records) = self.exec(async {
+        if self.backward_edges
+            && let Ok(records) = self.exec(async {
                 self.storage
                     .scan(BackwardAdjKey::dst_prefix(node_id.0))
                     .await
-            }) {
-                for record in &records {
-                    if BackwardAdjKey::decode(&record.key).is_ok() {
-                        if record.value.len() >= 8 {
-                            let edge_id =
-                                u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                            self.delete_edge(EdgeId(edge_id));
-                        }
-                    }
+            })
+        {
+            for record in &records {
+                if BackwardAdjKey::decode(&record.key).is_ok()
+                    && record.value.len() >= 8
+                {
+                    let edge_id =
+                        u64::from_le_bytes(record.value[..8].try_into().unwrap());
+                    self.delete_edge(EdgeId(edge_id));
                 }
             }
         }
@@ -449,17 +449,17 @@ impl GraphStoreMut for SlateGraphStore {
         let mut ops = vec![RecordOp::Delete(prop_key.encode())];
 
         // Remove from property index if we had a sortable value
-        if let Some(ref value) = existing {
-            if let Some(sortable) = values::encode_sortable_value(value) {
-                let catalog = self.catalog.read();
-                if let Some(prop_id) = catalog.get_prop_key_id(key) {
-                    let idx_key = PropertyIndexKey {
-                        prop_id,
-                        sortable_value: sortable,
-                        node_id: id.0,
-                    };
-                    ops.push(RecordOp::Delete(idx_key.encode()));
-                }
+        if let Some(ref value) = existing
+            && let Some(sortable) = values::encode_sortable_value(value)
+        {
+            let catalog = self.catalog.read();
+            if let Some(prop_id) = catalog.get_prop_key_id(key) {
+                let idx_key = PropertyIndexKey {
+                    prop_id,
+                    sortable_value: sortable,
+                    node_id: id.0,
+                };
+                ops.push(RecordOp::Delete(idx_key.encode()));
             }
         }
 

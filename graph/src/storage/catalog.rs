@@ -1,6 +1,6 @@
 use arcstr::ArcStr;
 use bytes::Bytes;
-use common::storage::{Storage, StorageRead};
+use common::storage::Storage;
 
 use crate::error::{Error, Result};
 use crate::serde::keys::{CatalogByIdKey, CatalogByNameKey};
@@ -51,6 +51,7 @@ impl BiMap {
         self.by_name.len()
     }
 
+    #[allow(dead_code)]
     fn names(&self) -> impl Iterator<Item = &ArcStr> {
         self.by_name.keys()
     }
@@ -94,6 +95,7 @@ impl Catalog {
         self.labels.len()
     }
 
+    #[allow(dead_code)]
     pub fn all_label_names(&self) -> Vec<ArcStr> {
         self.labels.names().cloned().collect()
     }
@@ -121,6 +123,7 @@ impl Catalog {
         self.edge_types.get_name(id)
     }
 
+    #[allow(dead_code)]
     pub fn get_edge_type_id(&self, name: &str) -> Option<u32> {
         self.edge_types.get_id(name)
     }
@@ -129,6 +132,7 @@ impl Catalog {
         self.edge_types.len()
     }
 
+    #[allow(dead_code)]
     pub fn all_edge_type_names(&self) -> Vec<ArcStr> {
         self.edge_types.names().cloned().collect()
     }
@@ -154,6 +158,7 @@ impl Catalog {
 
     // --- Property Keys ---
 
+    #[allow(dead_code)]
     pub fn get_prop_key_name(&self, id: u32) -> Option<&ArcStr> {
         self.prop_keys.get_name(id)
     }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use bytes::{BufMut, Bytes, BytesMut};
 use common::serde::sortable::{decode_f64_sortable, decode_i64_sortable, encode_f64_sortable, encode_i64_sortable};
 use common::serde::terminated_bytes;

@@ -3,7 +3,7 @@ pub(crate) mod merge_operator;
 mod reader;
 mod writer;
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -18,7 +18,6 @@ use crate::serde::keys::{MetadataKey, SequenceKey};
 use crate::serde::{MetadataSubType, SequenceKind};
 
 use catalog::Catalog;
-pub(crate) use merge_operator::GraphMergeOperator;
 
 /// Graph storage adapter that implements Grafeo's `GraphStore` + `GraphStoreMut`
 /// traits over OpenData's `Storage` (SlateDB) abstraction.
@@ -91,11 +90,6 @@ impl SlateGraphStore {
         tokio::task::block_in_place(|| self.rt.block_on(f)).map_err(Error::from)
     }
 
-    /// Returns the underlying storage (for tests and diagnostics).
-    #[cfg(test)]
-    pub(crate) fn storage(&self) -> &dyn Storage {
-        self.storage.as_ref()
-    }
 }
 
 /// Loads an i64 metadata counter from storage, defaulting to 0 if absent.
@@ -133,7 +127,3 @@ pub(crate) fn encode_i64_le(val: i64) -> Bytes {
     Bytes::copy_from_slice(&val.to_le_bytes())
 }
 
-/// Encodes a u64 as little-endian bytes for metadata storage.
-pub(crate) fn encode_u64_le(val: u64) -> Bytes {
-    Bytes::copy_from_slice(&val.to_le_bytes())
-}

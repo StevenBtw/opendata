@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use bytes::{BufMut, Bytes, BytesMut};
 use common::serde::key_prefix::{KeyPrefix, RecordTag};
 use common::serde::terminated_bytes;
