@@ -5,9 +5,9 @@ use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
 use grafeo_core::graph::traits::{GraphStore, GraphStoreMut};
 
 use super::SlateGraphStore;
-use crate::serde::keys::*;
-use crate::serde::values::{self, EdgeRecordValue, NodeRecordValue, FLAG_DELETED};
 use crate::serde::MetadataSubType;
+use crate::serde::keys::*;
+use crate::serde::values::{self, EdgeRecordValue, FLAG_DELETED, NodeRecordValue};
 use common::storage::{MergeRecordOp, PutRecordOp, Record, RecordOp};
 
 impl GraphStoreMut for SlateGraphStore {
@@ -54,10 +54,7 @@ impl GraphStoreMut for SlateGraphStore {
                 let (label_id, catalog_ops) = catalog.get_or_create_label(label);
                 ops.extend(catalog_ops);
 
-                let label_key = LabelIndexKey {
-                    label_id,
-                    node_id,
-                };
+                let label_key = LabelIndexKey { label_id, node_id };
                 ops.push(RecordOp::Put(PutRecordOp::from(Record::new(
                     label_key.encode(),
                     Bytes::new(),
@@ -226,11 +223,9 @@ impl GraphStoreMut for SlateGraphStore {
         ))));
 
         // Delete properties
-        if let Ok(records) = self.exec(async {
-            self.storage
-                .scan(NodePropertyKey::node_prefix(id.0))
-                .await
-        }) {
+        if let Ok(records) =
+            self.exec(async { self.storage.scan(NodePropertyKey::node_prefix(id.0)).await })
+        {
             for record in &records {
                 ops.push(RecordOp::Delete(record.key.clone()));
             }
@@ -270,9 +265,7 @@ impl GraphStoreMut for SlateGraphStore {
                 .await
         }) {
             for record in &records {
-                if ForwardAdjKey::decode(&record.key).is_ok()
-                    && record.value.len() >= 8
-                {
+                if ForwardAdjKey::decode(&record.key).is_ok() && record.value.len() >= 8 {
                     let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
                     self.delete_edge(EdgeId(edge_id));
                 }
@@ -288,11 +281,8 @@ impl GraphStoreMut for SlateGraphStore {
             })
         {
             for record in &records {
-                if BackwardAdjKey::decode(&record.key).is_ok()
-                    && record.value.len() >= 8
-                {
-                    let edge_id =
-                        u64::from_le_bytes(record.value[..8].try_into().unwrap());
+                if BackwardAdjKey::decode(&record.key).is_ok() && record.value.len() >= 8 {
+                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
                     self.delete_edge(EdgeId(edge_id));
                 }
             }
@@ -360,11 +350,9 @@ impl GraphStoreMut for SlateGraphStore {
         }
 
         // Delete edge properties
-        if let Ok(records) = self.exec(async {
-            self.storage
-                .scan(EdgePropertyKey::edge_prefix(id.0))
-                .await
-        }) {
+        if let Ok(records) =
+            self.exec(async { self.storage.scan(EdgePropertyKey::edge_prefix(id.0)).await })
+        {
             for record in &records {
                 ops.push(RecordOp::Delete(record.key.clone()));
             }

@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
@@ -64,12 +64,10 @@ impl GraphStore for SlateGraphStore {
             node_id: id.0,
             prop_key: bytes::Bytes::copy_from_slice(key.as_str().as_bytes()),
         };
-        self.exec(async {
-            self.storage.get(prop_key.encode()).await
-        })
-        .ok()
-        .flatten()
-        .and_then(|record| values::decode_value(&record.value).ok())
+        self.exec(async { self.storage.get(prop_key.encode()).await })
+            .ok()
+            .flatten()
+            .and_then(|record| values::decode_value(&record.value).ok())
     }
 
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
@@ -77,12 +75,10 @@ impl GraphStore for SlateGraphStore {
             edge_id: id.0,
             prop_key: bytes::Bytes::copy_from_slice(key.as_str().as_bytes()),
         };
-        self.exec(async {
-            self.storage.get(prop_key.encode()).await
-        })
-        .ok()
-        .flatten()
-        .and_then(|record| values::decode_value(&record.value).ok())
+        self.exec(async { self.storage.get(prop_key.encode()).await })
+            .ok()
+            .flatten()
+            .and_then(|record| values::decode_value(&record.value).ok())
     }
 
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
@@ -137,9 +133,8 @@ impl GraphStore for SlateGraphStore {
         let mut result = Vec::new();
 
         if matches!(direction, Direction::Outgoing | Direction::Both)
-            && let Ok(records) = self.exec(async {
-                self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await
-            })
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
         {
             for record in &records {
                 if let Ok(key) = ForwardAdjKey::decode(&record.key) {
@@ -150,9 +145,8 @@ impl GraphStore for SlateGraphStore {
 
         if self.backward_edges
             && matches!(direction, Direction::Incoming | Direction::Both)
-            && let Ok(records) = self.exec(async {
-                self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await
-            })
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
         {
             for record in &records {
                 if let Ok(key) = BackwardAdjKey::decode(&record.key) {
@@ -168,9 +162,8 @@ impl GraphStore for SlateGraphStore {
         let mut result = Vec::new();
 
         if matches!(direction, Direction::Outgoing | Direction::Both)
-            && let Ok(records) = self.exec(async {
-                self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await
-            })
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
         {
             for record in &records {
                 if let Ok(key) = ForwardAdjKey::decode(&record.key)
@@ -184,9 +177,8 @@ impl GraphStore for SlateGraphStore {
 
         if self.backward_edges
             && matches!(direction, Direction::Incoming | Direction::Both)
-            && let Ok(records) = self.exec(async {
-                self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await
-            })
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
         {
             for record in &records {
                 if let Ok(key) = BackwardAdjKey::decode(&record.key)
@@ -202,22 +194,18 @@ impl GraphStore for SlateGraphStore {
     }
 
     fn out_degree(&self, node: NodeId) -> usize {
-        self.exec(async {
-            self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await
-        })
-        .map(|records| records.len())
-        .unwrap_or(0)
+        self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
+            .map(|records| records.len())
+            .unwrap_or(0)
     }
 
     fn in_degree(&self, node: NodeId) -> usize {
         if !self.backward_edges {
             return 0;
         }
-        self.exec(async {
-            self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await
-        })
-        .map(|records| records.len())
-        .unwrap_or(0)
+        self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
+            .map(|records| records.len())
+            .unwrap_or(0)
     }
 
     fn has_backward_adjacency(&self) -> bool {
@@ -225,9 +213,9 @@ impl GraphStore for SlateGraphStore {
     }
 
     fn node_ids(&self) -> Vec<NodeId> {
-        let Ok(records) = self.exec(async {
-            self.storage.scan(NodeRecordKey::all_nodes_range()).await
-        }) else {
+        let Ok(records) =
+            self.exec(async { self.storage.scan(NodeRecordKey::all_nodes_range()).await })
+        else {
             return Vec::new();
         };
 
@@ -496,9 +484,7 @@ impl SlateGraphStore {
             if let Ok(key) = NodePropertyKey::decode(&record.key)
                 && let Ok(val) = values::decode_value(&record.value)
             {
-                let prop_key = PropertyKey::new(
-                    std::str::from_utf8(&key.prop_key).unwrap_or(""),
-                );
+                let prop_key = PropertyKey::new(std::str::from_utf8(&key.prop_key).unwrap_or(""));
                 props.insert(prop_key, val);
             }
         }
@@ -518,9 +504,7 @@ impl SlateGraphStore {
             if let Ok(key) = EdgePropertyKey::decode(&record.key)
                 && let Ok(val) = values::decode_value(&record.value)
             {
-                let prop_key = PropertyKey::new(
-                    std::str::from_utf8(&key.prop_key).unwrap_or(""),
-                );
+                let prop_key = PropertyKey::new(std::str::from_utf8(&key.prop_key).unwrap_or(""));
                 props.insert(prop_key, val);
             }
         }
@@ -537,11 +521,7 @@ impl SlateGraphStore {
         let mut labels = Vec::new();
 
         for label_id in 0..catalog.label_count() as u32 {
-            let key = LabelIndexKey {
-                label_id,
-                node_id,
-            }
-            .encode();
+            let key = LabelIndexKey { label_id, node_id }.encode();
 
             if let Ok(Some(_)) = self.exec(async { self.storage.get(key).await })
                 && let Some(name) = catalog.get_label_name(label_id)

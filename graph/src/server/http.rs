@@ -25,9 +25,7 @@ impl GraphServer {
 
     /// Run the HTTP server.
     pub async fn run(self) {
-        let state = AppState {
-            db: self.db,
-        };
+        let state = AppState { db: self.db };
 
         let app = build_router(state);
 

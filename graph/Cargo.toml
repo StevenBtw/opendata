@@ -46,9 +46,9 @@ lite = ["gql"]
 full = ["all-languages", "rdf", "algos", "gwp", "bolt"]
 
 [dependencies]
-grafeo-engine = { version = "0.5.11", default-features = false, optional = true }
-grafeo-core = { version = "0.5.11", default-features = false }
-grafeo-common = { version = "0.5.11" }
+grafeo-engine = { version = "0.5.12", default-features = false, optional = true }
+grafeo-core = { version = "0.5.12", default-features = false }
+grafeo-common = { version = "0.5.12" }
 common.workspace = true
 bytes.workspace = true
 tokio.workspace = true
