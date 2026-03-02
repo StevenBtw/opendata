@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use common::StorageConfig;
-use graph::db::GraphDb;
 use graph::Config;
+use graph::db::GraphDb;
 
 /// Create an in-memory GraphDb for testing — mirrors the timeseries
 /// `create_test_tsdb()` pattern.
@@ -188,9 +188,7 @@ async fn test_graph_traversal_two_hops() {
 
     // Two-hop traversal: Alice -> Bob -> Charlie
     let result = db
-        .execute(
-            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name",
-        )
+        .execute("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name")
         .expect("Two-hop traversal should succeed");
 
     assert_eq!(result.rows.len(), 1, "Should find Charlie via two hops");

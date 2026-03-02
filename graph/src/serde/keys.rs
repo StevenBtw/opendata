@@ -1,11 +1,11 @@
 use bytes::{BufMut, Bytes, BytesMut};
+use common::BytesRange;
+use common::serde::DeserializeError;
 use common::serde::key_prefix::{KeyPrefix, RecordTag};
 use common::serde::terminated_bytes;
-use common::serde::DeserializeError;
-use common::BytesRange;
 use std::ops::Bound;
 
-use super::{CatalogKind, MetadataSubType, RecordType, SequenceKind, KEY_VERSION};
+use super::{CatalogKind, KEY_VERSION, MetadataSubType, RecordType, SequenceKind};
 
 // ---------------------------------------------------------------------------
 // NodeRecordKey: [ver][0x10][node_id:u64 BE][epoch:u64 BE] = 18 bytes
@@ -37,13 +37,20 @@ impl NodeRecordKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("NodeRecordKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "NodeRecordKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::NodeRecord as u8 {
             return Err(DeserializeError {
-                message: format!("expected NodeRecord tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected NodeRecord tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let node_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
@@ -93,13 +100,20 @@ impl EdgeRecordKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("EdgeRecordKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "EdgeRecordKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::EdgeRecord as u8 {
             return Err(DeserializeError {
-                message: format!("expected EdgeRecord tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected EdgeRecord tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let edge_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
@@ -147,7 +161,10 @@ impl NodePropertyKey {
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::NodeProperty as u8 {
             return Err(DeserializeError {
-                message: format!("expected NodeProperty tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected NodeProperty tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let node_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
@@ -196,7 +213,10 @@ impl EdgePropertyKey {
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::EdgeProperty as u8 {
             return Err(DeserializeError {
-                message: format!("expected EdgeProperty tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected EdgeProperty tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let edge_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
@@ -243,19 +263,30 @@ impl ForwardAdjKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("ForwardAdjKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "ForwardAdjKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::ForwardAdj as u8 {
             return Err(DeserializeError {
-                message: format!("expected ForwardAdj tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected ForwardAdj tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let src = u64::from_be_bytes(data[2..10].try_into().unwrap());
         let edge_type_id = u32::from_be_bytes(data[10..14].try_into().unwrap());
         let dst = u64::from_be_bytes(data[14..22].try_into().unwrap());
-        Ok(Self { src, edge_type_id, dst })
+        Ok(Self {
+            src,
+            edge_type_id,
+            dst,
+        })
     }
 
     /// Scan range for all outgoing edges from a source node.
@@ -266,7 +297,6 @@ impl ForwardAdjKey {
         start.put_u64(src);
         BytesRange::prefix(start.freeze())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -297,19 +327,30 @@ impl BackwardAdjKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("BackwardAdjKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "BackwardAdjKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::BackwardAdj as u8 {
             return Err(DeserializeError {
-                message: format!("expected BackwardAdj tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected BackwardAdj tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let dst = u64::from_be_bytes(data[2..10].try_into().unwrap());
         let edge_type_id = u32::from_be_bytes(data[10..14].try_into().unwrap());
         let src = u64::from_be_bytes(data[14..22].try_into().unwrap());
-        Ok(Self { dst, edge_type_id, src })
+        Ok(Self {
+            dst,
+            edge_type_id,
+            src,
+        })
     }
 
     /// Scan range for all incoming edges to a destination node.
@@ -320,7 +361,6 @@ impl BackwardAdjKey {
         start.put_u64(dst);
         BytesRange::prefix(start.freeze())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -349,13 +389,20 @@ impl LabelIndexKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("LabelIndexKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "LabelIndexKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
         if prefix.tag().record_type() != RecordType::LabelIndex as u8 {
             return Err(DeserializeError {
-                message: format!("expected LabelIndex tag, got {}", prefix.tag().record_type()),
+                message: format!(
+                    "expected LabelIndex tag, got {}",
+                    prefix.tag().record_type()
+                ),
             });
         }
         let label_id = u32::from_be_bytes(data[2..6].try_into().unwrap());
@@ -371,7 +418,6 @@ impl LabelIndexKey {
         start.put_u32(label_id);
         BytesRange::prefix(start.freeze())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +537,11 @@ impl CatalogByIdKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("CatalogByIdKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "CatalogByIdKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
@@ -574,7 +624,11 @@ impl MetadataKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         if data.len() < Self::SIZE {
             return Err(DeserializeError {
-                message: format!("MetadataKey too short: need {}, got {}", Self::SIZE, data.len()),
+                message: format!(
+                    "MetadataKey too short: need {}, got {}",
+                    Self::SIZE,
+                    data.len()
+                ),
             });
         }
         let prefix = KeyPrefix::from_bytes_versioned(data, KEY_VERSION)?;
@@ -658,7 +712,10 @@ mod tests {
     #[test]
     fn should_roundtrip_node_record_key() {
         // given
-        let key = NodeRecordKey { node_id: 42, epoch: 7 };
+        let key = NodeRecordKey {
+            node_id: 42,
+            epoch: 7,
+        };
 
         // when
         let encoded = key.encode();
@@ -672,7 +729,10 @@ mod tests {
     #[test]
     fn should_roundtrip_edge_record_key() {
         // given
-        let key = EdgeRecordKey { edge_id: 100, epoch: 3 };
+        let key = EdgeRecordKey {
+            edge_id: 100,
+            epoch: 3,
+        };
 
         // when
         let encoded = key.encode();
@@ -754,7 +814,10 @@ mod tests {
     #[test]
     fn should_roundtrip_label_index_key() {
         // given
-        let key = LabelIndexKey { label_id: 3, node_id: 42 };
+        let key = LabelIndexKey {
+            label_id: 3,
+            node_id: 42,
+        };
 
         // when
         let encoded = key.encode();
@@ -801,7 +864,9 @@ mod tests {
     #[test]
     fn should_roundtrip_metadata_key() {
         // given
-        let key = MetadataKey { sub_type: MetadataSubType::NodeCount };
+        let key = MetadataKey {
+            sub_type: MetadataSubType::NodeCount,
+        };
 
         // when
         let encoded = key.encode();
@@ -815,9 +880,21 @@ mod tests {
     #[test]
     fn should_order_node_records_by_id_then_epoch() {
         // given
-        let k1 = NodeRecordKey { node_id: 1, epoch: 5 }.encode();
-        let k2 = NodeRecordKey { node_id: 1, epoch: 10 }.encode();
-        let k3 = NodeRecordKey { node_id: 2, epoch: 1 }.encode();
+        let k1 = NodeRecordKey {
+            node_id: 1,
+            epoch: 5,
+        }
+        .encode();
+        let k2 = NodeRecordKey {
+            node_id: 1,
+            epoch: 10,
+        }
+        .encode();
+        let k3 = NodeRecordKey {
+            node_id: 2,
+            epoch: 1,
+        }
+        .encode();
 
         // then: lexicographic order should be k1 < k2 < k3
         assert!(k1 < k2, "same node, earlier epoch should sort first");
@@ -827,10 +904,30 @@ mod tests {
     #[test]
     fn should_order_forward_adj_by_src_type_dst() {
         // given
-        let k1 = ForwardAdjKey { src: 1, edge_type_id: 1, dst: 10 }.encode();
-        let k2 = ForwardAdjKey { src: 1, edge_type_id: 1, dst: 20 }.encode();
-        let k3 = ForwardAdjKey { src: 1, edge_type_id: 2, dst: 5 }.encode();
-        let k4 = ForwardAdjKey { src: 2, edge_type_id: 1, dst: 1 }.encode();
+        let k1 = ForwardAdjKey {
+            src: 1,
+            edge_type_id: 1,
+            dst: 10,
+        }
+        .encode();
+        let k2 = ForwardAdjKey {
+            src: 1,
+            edge_type_id: 1,
+            dst: 20,
+        }
+        .encode();
+        let k3 = ForwardAdjKey {
+            src: 1,
+            edge_type_id: 2,
+            dst: 5,
+        }
+        .encode();
+        let k4 = ForwardAdjKey {
+            src: 2,
+            edge_type_id: 1,
+            dst: 1,
+        }
+        .encode();
 
         // then
         assert!(k1 < k2, "same src+type, dst 10 < dst 20");
@@ -841,9 +938,21 @@ mod tests {
     #[test]
     fn should_order_label_index_by_label_then_node() {
         // given
-        let k1 = LabelIndexKey { label_id: 1, node_id: 100 }.encode();
-        let k2 = LabelIndexKey { label_id: 1, node_id: 200 }.encode();
-        let k3 = LabelIndexKey { label_id: 2, node_id: 50 }.encode();
+        let k1 = LabelIndexKey {
+            label_id: 1,
+            node_id: 100,
+        }
+        .encode();
+        let k2 = LabelIndexKey {
+            label_id: 1,
+            node_id: 200,
+        }
+        .encode();
+        let k3 = LabelIndexKey {
+            label_id: 2,
+            node_id: 50,
+        }
+        .encode();
 
         // then
         assert!(k1 < k2, "same label, node 100 < node 200");
@@ -853,14 +962,47 @@ mod tests {
     #[test]
     fn should_separate_record_types_lexicographically() {
         // given: one key from each record type
-        let node = NodeRecordKey { node_id: 0, epoch: 0 }.encode();
-        let edge = EdgeRecordKey { edge_id: 0, epoch: 0 }.encode();
-        let nprop = NodePropertyKey { node_id: 0, prop_key: Bytes::from("a") }.encode();
-        let eprop = EdgePropertyKey { edge_id: 0, prop_key: Bytes::from("a") }.encode();
-        let fwd = ForwardAdjKey { src: 0, edge_type_id: 0, dst: 0 }.encode();
-        let bwd = BackwardAdjKey { dst: 0, edge_type_id: 0, src: 0 }.encode();
-        let label = LabelIndexKey { label_id: 0, node_id: 0 }.encode();
-        let meta = MetadataKey { sub_type: MetadataSubType::NodeCount }.encode();
+        let node = NodeRecordKey {
+            node_id: 0,
+            epoch: 0,
+        }
+        .encode();
+        let edge = EdgeRecordKey {
+            edge_id: 0,
+            epoch: 0,
+        }
+        .encode();
+        let nprop = NodePropertyKey {
+            node_id: 0,
+            prop_key: Bytes::from("a"),
+        }
+        .encode();
+        let eprop = EdgePropertyKey {
+            edge_id: 0,
+            prop_key: Bytes::from("a"),
+        }
+        .encode();
+        let fwd = ForwardAdjKey {
+            src: 0,
+            edge_type_id: 0,
+            dst: 0,
+        }
+        .encode();
+        let bwd = BackwardAdjKey {
+            dst: 0,
+            edge_type_id: 0,
+            src: 0,
+        }
+        .encode();
+        let label = LabelIndexKey {
+            label_id: 0,
+            node_id: 0,
+        }
+        .encode();
+        let meta = MetadataKey {
+            sub_type: MetadataSubType::NodeCount,
+        }
+        .encode();
 
         // then: record types sort in order of their tag byte
         assert!(node < edge);
@@ -876,23 +1018,59 @@ mod tests {
     fn should_node_prefix_contain_all_epochs() {
         // given
         let prefix_range = NodeRecordKey::node_prefix(42);
-        let k1 = NodeRecordKey { node_id: 42, epoch: 0 }.encode();
-        let k2 = NodeRecordKey { node_id: 42, epoch: u64::MAX }.encode();
-        let k3 = NodeRecordKey { node_id: 43, epoch: 0 }.encode();
+        let k1 = NodeRecordKey {
+            node_id: 42,
+            epoch: 0,
+        }
+        .encode();
+        let k2 = NodeRecordKey {
+            node_id: 42,
+            epoch: u64::MAX,
+        }
+        .encode();
+        let k3 = NodeRecordKey {
+            node_id: 43,
+            epoch: 0,
+        }
+        .encode();
 
         // then
-        assert!(prefix_range.contains(&k1), "epoch 0 should be in prefix range");
-        assert!(prefix_range.contains(&k2), "max epoch should be in prefix range");
-        assert!(!prefix_range.contains(&k3), "different node should not be in prefix range");
+        assert!(
+            prefix_range.contains(&k1),
+            "epoch 0 should be in prefix range"
+        );
+        assert!(
+            prefix_range.contains(&k2),
+            "max epoch should be in prefix range"
+        );
+        assert!(
+            !prefix_range.contains(&k3),
+            "different node should not be in prefix range"
+        );
     }
 
     #[test]
     fn should_forward_adj_src_prefix_contain_all_types_and_dsts() {
         // given
         let prefix_range = ForwardAdjKey::src_prefix(10);
-        let k1 = ForwardAdjKey { src: 10, edge_type_id: 1, dst: 20 }.encode();
-        let k2 = ForwardAdjKey { src: 10, edge_type_id: 99, dst: 999 }.encode();
-        let k3 = ForwardAdjKey { src: 11, edge_type_id: 1, dst: 1 }.encode();
+        let k1 = ForwardAdjKey {
+            src: 10,
+            edge_type_id: 1,
+            dst: 20,
+        }
+        .encode();
+        let k2 = ForwardAdjKey {
+            src: 10,
+            edge_type_id: 99,
+            dst: 999,
+        }
+        .encode();
+        let k3 = ForwardAdjKey {
+            src: 11,
+            edge_type_id: 1,
+            dst: 1,
+        }
+        .encode();
 
         // then
         assert!(prefix_range.contains(&k1));
@@ -904,9 +1082,21 @@ mod tests {
     fn should_label_prefix_contain_all_nodes() {
         // given
         let prefix_range = LabelIndexKey::label_prefix(5);
-        let k1 = LabelIndexKey { label_id: 5, node_id: 1 }.encode();
-        let k2 = LabelIndexKey { label_id: 5, node_id: u64::MAX }.encode();
-        let k3 = LabelIndexKey { label_id: 6, node_id: 1 }.encode();
+        let k1 = LabelIndexKey {
+            label_id: 5,
+            node_id: 1,
+        }
+        .encode();
+        let k2 = LabelIndexKey {
+            label_id: 5,
+            node_id: u64::MAX,
+        }
+        .encode();
+        let k3 = LabelIndexKey {
+            label_id: 6,
+            node_id: 1,
+        }
+        .encode();
 
         // then
         assert!(prefix_range.contains(&k1));

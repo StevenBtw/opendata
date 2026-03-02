@@ -10,9 +10,9 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use common::StorageConfig;
+use graph::Config;
 use graph::db::GraphDb;
 use graph::server::build_app;
-use graph::Config;
 
 /// Create an in-memory GraphDb and build the HTTP router.
 async fn setup() -> axum::Router {

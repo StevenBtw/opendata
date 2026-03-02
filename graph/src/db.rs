@@ -5,8 +5,8 @@ use std::sync::Arc;
 use common::storage::Storage;
 use common::{StorageRuntime, StorageSemantics};
 
-use crate::storage::merge_operator::GraphMergeOperator;
 use crate::storage::SlateGraphStore;
+use crate::storage::merge_operator::GraphMergeOperator;
 use crate::{Config, Result};
 
 /// High-level graph database backed by SlateDB.

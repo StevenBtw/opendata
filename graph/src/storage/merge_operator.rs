@@ -20,9 +20,7 @@ impl MergeOperator for GraphMergeOperator {
         let record_type = (key[1] & 0xF0) >> 4;
 
         match record_type {
-            rt if rt == RecordType::Metadata as u8 => {
-                merge_i64_counter(existing_value, new_value)
-            }
+            rt if rt == RecordType::Metadata as u8 => merge_i64_counter(existing_value, new_value),
             _ => new_value, // last-write-wins
         }
     }
@@ -56,8 +54,8 @@ fn merge_i64_counter(existing: Option<Bytes>, new: Bytes) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serde::keys::MetadataKey;
     use crate::serde::MetadataSubType;
+    use crate::serde::keys::MetadataKey;
 
     #[test]
     fn should_merge_counters_additively() {

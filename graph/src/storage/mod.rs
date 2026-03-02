@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use common::storage::Storage;
 use common::SequenceAllocator;
+use common::storage::Storage;
 use tokio::runtime::Handle;
 use tracing::info;
 
@@ -89,7 +89,6 @@ impl SlateGraphStore {
     {
         tokio::task::block_in_place(|| self.rt.block_on(f)).map_err(Error::from)
     }
-
 }
 
 /// Loads an i64 metadata counter from storage, defaulting to 0 if absent.
@@ -126,4 +125,3 @@ async fn load_u64_metadata(storage: &dyn Storage, sub_type: MetadataSubType) -> 
 pub(crate) fn encode_i64_le(val: i64) -> Bytes {
     Bytes::copy_from_slice(&val.to_le_bytes())
 }
-

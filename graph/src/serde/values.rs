@@ -40,7 +40,11 @@ impl NodeRecordValue {
         let flags = u16::from_le_bytes(data[0..2].try_into().unwrap());
         let label_count = u16::from_le_bytes(data[2..4].try_into().unwrap());
         let prop_count = u16::from_le_bytes(data[4..6].try_into().unwrap());
-        Ok(Self { flags, label_count, prop_count })
+        Ok(Self {
+            flags,
+            label_count,
+            prop_count,
+        })
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -87,7 +91,13 @@ impl EdgeRecordValue {
         let type_id = u32::from_le_bytes(data[16..20].try_into().unwrap());
         let flags = u16::from_le_bytes(data[20..22].try_into().unwrap());
         let prop_count = u16::from_le_bytes(data[22..24].try_into().unwrap());
-        Ok(Self { src, dst, type_id, flags, prop_count })
+        Ok(Self {
+            src,
+            dst,
+            type_id,
+            flags,
+            prop_count,
+        })
     }
 
     pub fn is_deleted(&self) -> bool {

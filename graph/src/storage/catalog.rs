@@ -3,8 +3,8 @@ use bytes::Bytes;
 use common::storage::Storage;
 
 use crate::error::{Error, Result};
-use crate::serde::keys::{CatalogByIdKey, CatalogByNameKey};
 use crate::serde::CatalogKind;
+use crate::serde::keys::{CatalogByIdKey, CatalogByNameKey};
 
 /// Bidirectional dictionary mapping IDs to names and back.
 ///
@@ -55,25 +55,17 @@ impl BiMap {
 impl Catalog {
     /// Loads the catalog from storage by scanning all catalog key prefixes.
     pub async fn load(storage: &dyn Storage) -> Result<Self> {
-        let labels = load_bimap(
-            storage,
-            CatalogKind::LabelById,
-        )
-        .await?;
+        let labels = load_bimap(storage, CatalogKind::LabelById).await?;
 
-        let edge_types = load_bimap(
-            storage,
-            CatalogKind::EdgeTypeById,
-        )
-        .await?;
+        let edge_types = load_bimap(storage, CatalogKind::EdgeTypeById).await?;
 
-        let prop_keys = load_bimap(
-            storage,
-            CatalogKind::PropertyKeyById,
-        )
-        .await?;
+        let prop_keys = load_bimap(storage, CatalogKind::PropertyKeyById).await?;
 
-        Ok(Self { labels, edge_types, prop_keys })
+        Ok(Self {
+            labels,
+            edge_types,
+            prop_keys,
+        })
     }
 
     // --- Labels ---
@@ -93,17 +85,19 @@ impl Catalog {
     /// Gets or creates a label, returning (id, records_to_persist).
     ///
     /// If the label is new, returns catalog records that must be written to storage.
-    pub fn get_or_create_label(
-        &mut self,
-        name: &str,
-    ) -> (u32, Vec<common::storage::RecordOp>) {
+    pub fn get_or_create_label(&mut self, name: &str) -> (u32, Vec<common::storage::RecordOp>) {
         if let Some(id) = self.labels.get_id(name) {
             return (id, Vec::new());
         }
         let id = self.labels.next_id();
         let arc_name: ArcStr = ArcStr::from(name);
         self.labels.insert(id, arc_name.clone());
-        let ops = catalog_put_ops(CatalogKind::LabelById, CatalogKind::LabelByName, id, &arc_name);
+        let ops = catalog_put_ops(
+            CatalogKind::LabelById,
+            CatalogKind::LabelByName,
+            id,
+            &arc_name,
+        );
         (id, ops)
     }
 
@@ -117,10 +111,7 @@ impl Catalog {
         self.edge_types.len()
     }
 
-    pub fn get_or_create_edge_type(
-        &mut self,
-        name: &str,
-    ) -> (u32, Vec<common::storage::RecordOp>) {
+    pub fn get_or_create_edge_type(&mut self, name: &str) -> (u32, Vec<common::storage::RecordOp>) {
         if let Some(id) = self.edge_types.get_id(name) {
             return (id, Vec::new());
         }
@@ -142,10 +133,7 @@ impl Catalog {
         self.prop_keys.get_id(name)
     }
 
-    pub fn get_or_create_prop_key(
-        &mut self,
-        name: &str,
-    ) -> (u32, Vec<common::storage::RecordOp>) {
+    pub fn get_or_create_prop_key(&mut self, name: &str) -> (u32, Vec<common::storage::RecordOp>) {
         if let Some(id) = self.prop_keys.get_id(name) {
             return (id, Vec::new());
         }
@@ -163,19 +151,17 @@ impl Catalog {
 }
 
 /// Loads a BiMap from catalog-by-id entries in storage.
-async fn load_bimap(
-    storage: &dyn Storage,
-    kind: CatalogKind,
-) -> Result<BiMap> {
+async fn load_bimap(storage: &dyn Storage, kind: CatalogKind) -> Result<BiMap> {
     let range = CatalogByIdKey::kind_prefix(kind);
     let records = storage.scan(range).await?;
 
     let mut bimap = BiMap::default();
     for record in records {
         let catalog_key = CatalogByIdKey::decode(&record.key)?;
-        let name = ArcStr::from(std::str::from_utf8(&record.value).map_err(|e| {
-            Error::Encoding(format!("invalid UTF-8 in catalog value: {e}"))
-        })?);
+        let name = ArcStr::from(
+            std::str::from_utf8(&record.value)
+                .map_err(|e| Error::Encoding(format!("invalid UTF-8 in catalog value: {e}")))?,
+        );
         bimap.insert(catalog_key.id, name);
     }
     Ok(bimap)
@@ -190,7 +176,11 @@ fn catalog_put_ops(
 ) -> Vec<common::storage::RecordOp> {
     use common::storage::{PutRecordOp, Record, RecordOp};
 
-    let by_id_key = CatalogByIdKey { kind: by_id_kind, id }.encode();
+    let by_id_key = CatalogByIdKey {
+        kind: by_id_kind,
+        id,
+    }
+    .encode();
     let by_name_key = CatalogByNameKey {
         kind: by_name_kind,
         name: Bytes::copy_from_slice(name.as_bytes()),
