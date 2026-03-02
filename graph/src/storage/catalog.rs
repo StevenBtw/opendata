@@ -82,23 +82,13 @@ impl Catalog {
         self.labels.len()
     }
 
-    /// Gets or creates a label, returning (id, records_to_persist).
-    ///
-    /// If the label is new, returns catalog records that must be written to storage.
     pub fn get_or_create_label(&mut self, name: &str) -> (u32, Vec<common::storage::RecordOp>) {
-        if let Some(id) = self.labels.get_id(name) {
-            return (id, Vec::new());
-        }
-        let id = self.labels.next_id();
-        let arc_name: ArcStr = ArcStr::from(name);
-        self.labels.insert(id, arc_name.clone());
-        let ops = catalog_put_ops(
+        get_or_create(
+            &mut self.labels,
             CatalogKind::LabelById,
             CatalogKind::LabelByName,
-            id,
-            &arc_name,
-        );
-        (id, ops)
+            name,
+        )
     }
 
     // --- Edge Types ---
@@ -112,19 +102,12 @@ impl Catalog {
     }
 
     pub fn get_or_create_edge_type(&mut self, name: &str) -> (u32, Vec<common::storage::RecordOp>) {
-        if let Some(id) = self.edge_types.get_id(name) {
-            return (id, Vec::new());
-        }
-        let id = self.edge_types.next_id();
-        let arc_name: ArcStr = ArcStr::from(name);
-        self.edge_types.insert(id, arc_name.clone());
-        let ops = catalog_put_ops(
+        get_or_create(
+            &mut self.edge_types,
             CatalogKind::EdgeTypeById,
             CatalogKind::EdgeTypeByName,
-            id,
-            &arc_name,
-        );
-        (id, ops)
+            name,
+        )
     }
 
     // --- Property Keys ---
@@ -134,20 +117,29 @@ impl Catalog {
     }
 
     pub fn get_or_create_prop_key(&mut self, name: &str) -> (u32, Vec<common::storage::RecordOp>) {
-        if let Some(id) = self.prop_keys.get_id(name) {
-            return (id, Vec::new());
-        }
-        let id = self.prop_keys.next_id();
-        let arc_name: ArcStr = ArcStr::from(name);
-        self.prop_keys.insert(id, arc_name.clone());
-        let ops = catalog_put_ops(
+        get_or_create(
+            &mut self.prop_keys,
             CatalogKind::PropertyKeyById,
             CatalogKind::PropertyKeyByName,
-            id,
-            &arc_name,
-        );
-        (id, ops)
+            name,
+        )
     }
+}
+
+/// Gets or creates an entry in a BiMap, returning (id, records_to_persist).
+fn get_or_create(
+    bimap: &mut BiMap,
+    by_id_kind: CatalogKind,
+    by_name_kind: CatalogKind,
+    name: &str,
+) -> (u32, Vec<common::storage::RecordOp>) {
+    if let Some(id) = bimap.get_id(name) {
+        return (id, Vec::new());
+    }
+    let id = bimap.next_id();
+    let arc_name = ArcStr::from(name);
+    bimap.insert(id, arc_name.clone());
+    (id, catalog_put_ops(by_id_kind, by_name_kind, id, &arc_name))
 }
 
 /// Loads a BiMap from catalog-by-id entries in storage.

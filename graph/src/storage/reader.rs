@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arcstr::ArcStr;
+use bytes::Bytes;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
@@ -314,22 +315,7 @@ impl GraphStore for SlateGraphStore {
         };
 
         let range = PropertyIndexKey::prop_value_prefix(prop_id, &sortable);
-        let Ok(records) = self.exec(async { self.storage.scan(range).await }) else {
-            return Vec::new();
-        };
-
-        // Each PropertyIndexKey has node_id as the last 8 bytes
-        records
-            .iter()
-            .filter_map(|r| {
-                if r.key.len() >= 8 {
-                    let node_id = u64::from_be_bytes(r.key[r.key.len() - 8..].try_into().unwrap());
-                    Some(NodeId(node_id))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.node_ids_from_index_scan(range)
     }
 
     fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
@@ -373,21 +359,7 @@ impl GraphStore for SlateGraphStore {
             max_inclusive,
         );
 
-        let Ok(records) = self.exec(async { self.storage.scan(range).await }) else {
-            return Vec::new();
-        };
-
-        records
-            .iter()
-            .filter_map(|r| {
-                if r.key.len() >= 8 {
-                    let node_id = u64::from_be_bytes(r.key[r.key.len() - 8..].try_into().unwrap());
-                    Some(NodeId(node_id))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.node_ids_from_index_scan(range)
     }
 
     fn node_property_might_match(
@@ -471,44 +443,51 @@ impl SlateGraphStore {
         })
     }
 
-    /// Loads all properties for a node from storage.
     fn load_node_properties(&self, node_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        let records = self.exec(async {
-            self.storage
-                .scan(NodePropertyKey::node_prefix(node_id))
-                .await
-        })?;
+        self.load_properties(NodePropertyKey::node_prefix(node_id), |key| {
+            NodePropertyKey::decode(key).ok().map(|k| k.prop_key)
+        })
+    }
 
+    fn load_edge_properties(&self, edge_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
+        self.load_properties(EdgePropertyKey::edge_prefix(edge_id), |key| {
+            EdgePropertyKey::decode(key).ok().map(|k| k.prop_key)
+        })
+    }
+
+    /// Loads all properties from a scan range, using `extract_key` to get the property key bytes.
+    fn load_properties(
+        &self,
+        range: common::BytesRange,
+        extract_key: impl Fn(&[u8]) -> Option<Bytes>,
+    ) -> crate::Result<FxHashMap<PropertyKey, Value>> {
+        let records = self.exec(async { self.storage.scan(range).await })?;
         let mut props = FxHashMap::default();
         for record in &records {
-            if let Ok(key) = NodePropertyKey::decode(&record.key)
+            if let Some(prop_bytes) = extract_key(&record.key)
                 && let Ok(val) = values::decode_value(&record.value)
             {
-                let prop_key = PropertyKey::new(std::str::from_utf8(&key.prop_key).unwrap_or(""));
+                let prop_key = PropertyKey::new(std::str::from_utf8(&prop_bytes).unwrap_or(""));
                 props.insert(prop_key, val);
             }
         }
         Ok(props)
     }
 
-    /// Loads all properties for an edge from storage.
-    fn load_edge_properties(&self, edge_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        let records = self.exec(async {
-            self.storage
-                .scan(EdgePropertyKey::edge_prefix(edge_id))
-                .await
-        })?;
-
-        let mut props = FxHashMap::default();
-        for record in &records {
-            if let Ok(key) = EdgePropertyKey::decode(&record.key)
-                && let Ok(val) = values::decode_value(&record.value)
-            {
-                let prop_key = PropertyKey::new(std::str::from_utf8(&key.prop_key).unwrap_or(""));
-                props.insert(prop_key, val);
-            }
-        }
-        Ok(props)
+    /// Extracts NodeIds from the last 8 bytes of keys in an index scan.
+    fn node_ids_from_index_scan(&self, range: common::BytesRange) -> Vec<NodeId> {
+        let Ok(records) = self.exec(async { self.storage.scan(range).await }) else {
+            return Vec::new();
+        };
+        records
+            .iter()
+            .filter(|r| r.key.len() >= 8)
+            .map(|r| {
+                NodeId(u64::from_be_bytes(
+                    r.key[r.key.len() - 8..].try_into().unwrap(),
+                ))
+            })
+            .collect()
     }
 
     /// Loads all labels for a node by scanning the label index in reverse.

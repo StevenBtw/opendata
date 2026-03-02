@@ -41,30 +41,52 @@ pub(crate) enum RecordType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum CatalogKind {
-    /// Label dictionary (by ID).
     LabelById = 0,
-    /// Label dictionary (by name).
     LabelByName = 1,
-    /// Edge type dictionary (by ID).
     EdgeTypeById = 2,
-    /// Edge type dictionary (by name).
     EdgeTypeByName = 3,
-    /// Property key dictionary (by ID).
     PropertyKeyById = 4,
-    /// Property key dictionary (by name).
     PropertyKeyByName = 5,
+}
+
+impl TryFrom<u8> for CatalogKind {
+    type Error = common::serde::DeserializeError;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::LabelById),
+            1 => Ok(Self::LabelByName),
+            2 => Ok(Self::EdgeTypeById),
+            3 => Ok(Self::EdgeTypeByName),
+            4 => Ok(Self::PropertyKeyById),
+            5 => Ok(Self::PropertyKeyByName),
+            other => Err(common::serde::DeserializeError {
+                message: format!("unknown catalog kind: {other}"),
+            }),
+        }
+    }
 }
 
 /// Metadata sub-types stored after the key prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum MetadataSubType {
-    /// Node count counter.
     NodeCount = 0,
-    /// Edge count counter.
     EdgeCount = 1,
-    /// Current epoch.
     CurrentEpoch = 2,
+}
+
+impl TryFrom<u8> for MetadataSubType {
+    type Error = common::serde::DeserializeError;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::NodeCount),
+            1 => Ok(Self::EdgeCount),
+            2 => Ok(Self::CurrentEpoch),
+            other => Err(common::serde::DeserializeError {
+                message: format!("unknown metadata sub-type: {other}"),
+            }),
+        }
+    }
 }
 
 /// Sequence allocator sub-types in the reserved bits.

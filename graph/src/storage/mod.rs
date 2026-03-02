@@ -53,9 +53,15 @@ impl SlateGraphStore {
         let edge_seq = SequenceAllocator::load(storage.as_ref(), edge_seq_key).await?;
 
         // Load metadata counters
-        let node_count = load_i64_metadata(storage.as_ref(), MetadataSubType::NodeCount).await?;
-        let edge_count = load_i64_metadata(storage.as_ref(), MetadataSubType::EdgeCount).await?;
-        let epoch = load_u64_metadata(storage.as_ref(), MetadataSubType::CurrentEpoch).await?;
+        let node_count = i64::from_le_bytes(
+            load_metadata_bytes(storage.as_ref(), MetadataSubType::NodeCount).await?,
+        );
+        let edge_count = i64::from_le_bytes(
+            load_metadata_bytes(storage.as_ref(), MetadataSubType::EdgeCount).await?,
+        );
+        let epoch = u64::from_le_bytes(
+            load_metadata_bytes(storage.as_ref(), MetadataSubType::CurrentEpoch).await?,
+        );
 
         // Load catalog from storage
         let catalog = Catalog::load(storage.as_ref()).await?;
@@ -91,33 +97,12 @@ impl SlateGraphStore {
     }
 }
 
-/// Loads an i64 metadata counter from storage, defaulting to 0 if absent.
-async fn load_i64_metadata(storage: &dyn Storage, sub_type: MetadataSubType) -> Result<i64> {
+/// Loads raw metadata bytes from storage, returning first 8 bytes or zeroes.
+async fn load_metadata_bytes(storage: &dyn Storage, sub_type: MetadataSubType) -> Result<[u8; 8]> {
     let key = MetadataKey { sub_type }.encode();
     match storage.get(key).await? {
-        Some(record) => {
-            if record.value.len() >= 8 {
-                Ok(i64::from_le_bytes(record.value[..8].try_into().unwrap()))
-            } else {
-                Ok(0)
-            }
-        }
-        None => Ok(0),
-    }
-}
-
-/// Loads a u64 metadata value from storage, defaulting to 0 if absent.
-async fn load_u64_metadata(storage: &dyn Storage, sub_type: MetadataSubType) -> Result<u64> {
-    let key = MetadataKey { sub_type }.encode();
-    match storage.get(key).await? {
-        Some(record) => {
-            if record.value.len() >= 8 {
-                Ok(u64::from_le_bytes(record.value[..8].try_into().unwrap()))
-            } else {
-                Ok(0)
-            }
-        }
-        None => Ok(0),
+        Some(record) if record.value.len() >= 8 => Ok(record.value[..8].try_into().unwrap()),
+        _ => Ok([0u8; 8]),
     }
 }
 
