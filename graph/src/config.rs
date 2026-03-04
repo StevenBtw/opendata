@@ -10,7 +10,7 @@ pub enum GraphModel {
 }
 
 /// Configuration for the graph database.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Storage backend configuration.
     pub storage: StorageConfig,
@@ -20,6 +20,16 @@ pub struct Config {
     /// Whether to maintain backward adjacency indexes (incoming edges).
     #[serde(default = "default_true")]
     pub backward_edges: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            storage: StorageConfig::default(),
+            graph_model: GraphModel::default(),
+            backward_edges: true,
+        }
+    }
 }
 
 fn default_true() -> bool {

@@ -43,29 +43,30 @@ impl GraphStoreMut for SlateGraphStore {
             ops.push(RecordOp::Put(PutRecordOp::from(record)));
         }
 
-        // Write node record
+        // Resolve label IDs and write label index entries
+        let mut label_ids = Vec::with_capacity(labels.len());
+        {
+            let mut catalog = self.catalog.write();
+            for label in labels {
+                let (label_id, catalog_ops) = catalog.get_or_create_label(label);
+                ops.extend(catalog_ops);
+                label_ids.push(label_id);
+
+                let label_key = LabelIndexKey { label_id, node_id };
+                ops.push(put_record(label_key.encode(), Bytes::new()));
+            }
+        }
+
+        // Write node record with inline label IDs
         let node_key = NodeRecordKey {
             node_id,
             epoch: epoch.0,
         };
         let node_val = NodeRecordValue {
             flags: 0,
-            label_count: labels.len() as u16,
-            prop_count: 0,
+            label_ids,
         };
         ops.push(put_record(node_key.encode(), node_val.encode()));
-
-        // Write label index entries
-        {
-            let mut catalog = self.catalog.write();
-            for label in labels {
-                let (label_id, catalog_ops) = catalog.get_or_create_label(label);
-                ops.extend(catalog_ops);
-
-                let label_key = LabelIndexKey { label_id, node_id };
-                ops.push(put_record(label_key.encode(), Bytes::new()));
-            }
-        }
 
         ops.push(counter_merge(MetadataSubType::NodeCount, 1));
 
@@ -128,14 +129,14 @@ impl GraphStoreMut for SlateGraphStore {
         };
         ops.push(put_record(edge_key.encode(), edge_val.encode()));
 
-        // Write forward adjacency
+        // Write forward adjacency (edge_id in key, empty value)
         let fwd_key = ForwardAdjKey {
             src: src.0,
             edge_type_id: type_id,
             dst: dst.0,
+            edge_id,
         };
-        let edge_id_bytes = Bytes::copy_from_slice(&edge_id.to_le_bytes());
-        ops.push(put_record(fwd_key.encode(), edge_id_bytes.clone()));
+        ops.push(put_record(fwd_key.encode(), Bytes::new()));
 
         // Write backward adjacency if enabled
         if self.backward_edges {
@@ -143,8 +144,9 @@ impl GraphStoreMut for SlateGraphStore {
                 dst: dst.0,
                 edge_type_id: type_id,
                 src: src.0,
+                edge_id,
             };
-            ops.push(put_record(bwd_key.encode(), edge_id_bytes));
+            ops.push(put_record(bwd_key.encode(), Bytes::new()));
         }
 
         ops.push(counter_merge(MetadataSubType::EdgeCount, 1));
@@ -197,8 +199,7 @@ impl GraphStoreMut for SlateGraphStore {
         };
         let node_val = NodeRecordValue {
             flags: FLAG_DELETED,
-            label_count: 0,
-            prop_count: 0,
+            label_ids: Vec::new(),
         };
         ops.push(put_record(node_key.encode(), node_val.encode()));
 
@@ -238,9 +239,8 @@ impl GraphStoreMut for SlateGraphStore {
                 .await
         }) {
             for record in &records {
-                if ForwardAdjKey::decode(&record.key).is_ok() && record.value.len() >= 8 {
-                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                    self.delete_edge(EdgeId(edge_id));
+                if let Ok(key) = ForwardAdjKey::decode(&record.key) {
+                    self.delete_edge(EdgeId(key.edge_id));
                 }
             }
         }
@@ -254,9 +254,8 @@ impl GraphStoreMut for SlateGraphStore {
             })
         {
             for record in &records {
-                if BackwardAdjKey::decode(&record.key).is_ok() && record.value.len() >= 8 {
-                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                    self.delete_edge(EdgeId(edge_id));
+                if let Ok(key) = BackwardAdjKey::decode(&record.key) {
+                    self.delete_edge(EdgeId(key.edge_id));
                 }
             }
         }
@@ -306,6 +305,7 @@ impl GraphStoreMut for SlateGraphStore {
             src: edge_val.src,
             edge_type_id: edge_val.type_id,
             dst: edge_val.dst,
+            edge_id: id.0,
         };
         ops.push(RecordOp::Delete(fwd.encode()));
         if self.backward_edges {
@@ -313,6 +313,7 @@ impl GraphStoreMut for SlateGraphStore {
                 dst: edge_val.dst,
                 edge_type_id: edge_val.type_id,
                 src: edge_val.src,
+                edge_id: id.0,
             };
             ops.push(RecordOp::Delete(bwd.encode()));
         }
@@ -338,21 +339,20 @@ impl GraphStoreMut for SlateGraphStore {
             return;
         };
 
+        let mut catalog = self.catalog.write();
+        let (prop_key_id, catalog_ops) = catalog.get_or_create_prop_key(key);
+        let mut ops: Vec<RecordOp> = catalog_ops;
+
         let prop_key = NodePropertyKey {
             node_id: id.0,
-            prop_key: Bytes::copy_from_slice(key.as_bytes()),
+            prop_key_id,
         };
-
-        let mut ops = vec![put_record(prop_key.encode(), value_bytes)];
+        ops.push(put_record(prop_key.encode(), value_bytes));
 
         // Update property index if the value is sortable
         if let Some(sortable) = values::encode_sortable_value(&value) {
-            let mut catalog = self.catalog.write();
-            let (prop_id, catalog_ops) = catalog.get_or_create_prop_key(key);
-            ops.extend(catalog_ops);
-
             let idx_key = PropertyIndexKey {
-                prop_id,
+                prop_id: prop_key_id,
                 sortable_value: sortable,
                 node_id: id.0,
             };
@@ -367,25 +367,29 @@ impl GraphStoreMut for SlateGraphStore {
             return;
         };
 
+        let mut catalog = self.catalog.write();
+        let (prop_key_id, catalog_ops) = catalog.get_or_create_prop_key(key);
+        let mut ops: Vec<RecordOp> = catalog_ops;
+
         let prop_key = EdgePropertyKey {
             edge_id: id.0,
-            prop_key: Bytes::copy_from_slice(key.as_bytes()),
+            prop_key_id,
         };
+        ops.push(put_record(prop_key.encode(), value_bytes));
 
-        let _ = self.exec(async {
-            self.storage
-                .apply(vec![put_record(prop_key.encode(), value_bytes)])
-                .await
-        });
+        let _ = self.exec(async { self.storage.apply(ops).await });
     }
 
     fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
         // Read existing value first
         let existing = self.get_node_property(id, &PropertyKey::new(key));
 
+        let catalog = self.catalog.read();
+        let prop_key_id = catalog.get_prop_key_id(key)?;
+
         let prop_key = NodePropertyKey {
             node_id: id.0,
-            prop_key: Bytes::copy_from_slice(key.as_bytes()),
+            prop_key_id,
         };
 
         let mut ops = vec![RecordOp::Delete(prop_key.encode())];
@@ -394,17 +398,15 @@ impl GraphStoreMut for SlateGraphStore {
         if let Some(ref value) = existing
             && let Some(sortable) = values::encode_sortable_value(value)
         {
-            let catalog = self.catalog.read();
-            if let Some(prop_id) = catalog.get_prop_key_id(key) {
-                let idx_key = PropertyIndexKey {
-                    prop_id,
-                    sortable_value: sortable,
-                    node_id: id.0,
-                };
-                ops.push(RecordOp::Delete(idx_key.encode()));
-            }
+            let idx_key = PropertyIndexKey {
+                prop_id: prop_key_id,
+                sortable_value: sortable,
+                node_id: id.0,
+            };
+            ops.push(RecordOp::Delete(idx_key.encode()));
         }
 
+        drop(catalog);
         let _ = self.exec(async { self.storage.apply(ops).await });
         existing
     }
@@ -412,11 +414,18 @@ impl GraphStoreMut for SlateGraphStore {
     fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
         let existing = self.get_edge_property(id, &PropertyKey::new(key));
 
-        let prop_key = EdgePropertyKey {
-            edge_id: id.0,
-            prop_key: Bytes::copy_from_slice(key.as_bytes()),
+        let catalog = self.catalog.read();
+        let prop_key_id = match catalog.get_prop_key_id(key) {
+            Some(id) => id,
+            None => return existing,
         };
 
+        let prop_key = EdgePropertyKey {
+            edge_id: id.0,
+            prop_key_id,
+        };
+
+        drop(catalog);
         let _ = self.exec(async {
             self.storage
                 .apply(vec![RecordOp::Delete(prop_key.encode())])
@@ -427,27 +436,57 @@ impl GraphStoreMut for SlateGraphStore {
     }
 
     fn add_label(&self, node_id: NodeId, label: &str) -> bool {
+        // Read current node record to get existing label_ids
+        let current = self
+            .exec(async {
+                let records = self
+                    .storage
+                    .scan(NodeRecordKey::node_prefix(node_id.0))
+                    .await?;
+                Ok(records)
+            })
+            .ok()
+            .and_then(|records| {
+                let record = records.last()?;
+                let key = NodeRecordKey::decode(&record.key).ok()?;
+                let val = NodeRecordValue::decode(&record.value).ok()?;
+                if val.is_deleted() {
+                    None
+                } else {
+                    Some((key.epoch, val))
+                }
+            });
+
+        let (epoch, mut node_val) = match current {
+            Some(v) => v,
+            None => return false,
+        };
+
         let mut catalog = self.catalog.write();
         let (label_id, catalog_ops) = catalog.get_or_create_label(label);
 
-        // Check if label already exists for this node
+        // Check if label already exists
+        if node_val.label_ids.contains(&label_id) {
+            return false;
+        }
+
+        node_val.label_ids.push(label_id);
+
+        let mut ops = catalog_ops;
+
+        // Update label index
         let label_key = LabelIndexKey {
             label_id,
             node_id: node_id.0,
         };
-
-        let exists = self
-            .exec(async { self.storage.get(label_key.encode()).await })
-            .ok()
-            .flatten()
-            .is_some();
-
-        if exists {
-            return false;
-        }
-
-        let mut ops = catalog_ops;
         ops.push(put_record(label_key.encode(), Bytes::new()));
+
+        // Rewrite node record with updated labels
+        let node_key = NodeRecordKey {
+            node_id: node_id.0,
+            epoch,
+        };
+        ops.push(put_record(node_key.encode(), node_val.encode()));
 
         let _ = self.exec(async { self.storage.apply(ops).await });
         true
@@ -461,27 +500,55 @@ impl GraphStoreMut for SlateGraphStore {
         };
         drop(catalog);
 
+        // Read current node record
+        let current = self
+            .exec(async {
+                let records = self
+                    .storage
+                    .scan(NodeRecordKey::node_prefix(node_id.0))
+                    .await?;
+                Ok(records)
+            })
+            .ok()
+            .and_then(|records| {
+                let record = records.last()?;
+                let key = NodeRecordKey::decode(&record.key).ok()?;
+                let val = NodeRecordValue::decode(&record.value).ok()?;
+                if val.is_deleted() {
+                    None
+                } else {
+                    Some((key.epoch, val))
+                }
+            });
+
+        let (epoch, mut node_val) = match current {
+            Some(v) => v,
+            None => return false,
+        };
+
+        if !node_val.label_ids.contains(&label_id) {
+            return false;
+        }
+
+        node_val.label_ids.retain(|&id| id != label_id);
+
+        let mut ops = Vec::new();
+
+        // Remove label index entry
         let label_key = LabelIndexKey {
             label_id,
             node_id: node_id.0,
         };
+        ops.push(RecordOp::Delete(label_key.encode()));
 
-        // Check if it exists
-        let exists = self
-            .exec(async { self.storage.get(label_key.encode()).await })
-            .ok()
-            .flatten()
-            .is_some();
+        // Rewrite node record
+        let node_key = NodeRecordKey {
+            node_id: node_id.0,
+            epoch,
+        };
+        ops.push(put_record(node_key.encode(), node_val.encode()));
 
-        if !exists {
-            return false;
-        }
-
-        let _ = self.exec(async {
-            self.storage
-                .apply(vec![RecordOp::Delete(label_key.encode())])
-                .await
-        });
+        let _ = self.exec(async { self.storage.apply(ops).await });
         true
     }
 }

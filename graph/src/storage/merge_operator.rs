@@ -8,7 +8,7 @@ use crate::serde::RecordType;
 /// Most record types use last-write-wins semantics. The only exception
 /// is metadata counters (record type 0xE0), which use additive merge
 /// to support atomic counter increments.
-pub(crate) struct GraphMergeOperator;
+pub struct GraphMergeOperator;
 
 impl MergeOperator for GraphMergeOperator {
     fn merge(&self, key: &Bytes, existing_value: Option<Bytes>, new_value: Bytes) -> Bytes {

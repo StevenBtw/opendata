@@ -7,44 +7,51 @@ use grafeo_common::types::Value;
 pub(crate) const FLAG_DELETED: u16 = 0x0001;
 
 // ---------------------------------------------------------------------------
-// NodeRecordValue: flags(2) + label_count(2) + prop_count(2) + reserved(2) = 8 bytes
+// NodeRecordValue: flags(2) + label_count(2) + label_ids([u32 LE; label_count])
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeRecordValue {
     pub flags: u16,
-    pub label_count: u16,
-    pub prop_count: u16,
+    pub label_ids: Vec<u32>,
 }
 
 impl NodeRecordValue {
-    const SIZE: usize = 8;
+    const MIN_SIZE: usize = 4; // flags(2) + label_count(2)
 
     pub fn encode(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(Self::SIZE);
+        let mut buf = BytesMut::with_capacity(Self::MIN_SIZE + self.label_ids.len() * 4);
         buf.put_u16_le(self.flags);
-        buf.put_u16_le(self.label_count);
-        buf.put_u16_le(self.prop_count);
-        buf.put_u16_le(0); // reserved
+        buf.put_u16_le(self.label_ids.len() as u16);
+        for &id in &self.label_ids {
+            buf.put_u32_le(id);
+        }
         buf.freeze()
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, crate::Error> {
-        if data.len() < Self::SIZE {
+        if data.len() < Self::MIN_SIZE {
             return Err(crate::Error::Encoding(format!(
                 "NodeRecordValue too short: need {}, got {}",
-                Self::SIZE,
+                Self::MIN_SIZE,
                 data.len()
             )));
         }
         let flags = u16::from_le_bytes(data[0..2].try_into().unwrap());
-        let label_count = u16::from_le_bytes(data[2..4].try_into().unwrap());
-        let prop_count = u16::from_le_bytes(data[4..6].try_into().unwrap());
-        Ok(Self {
-            flags,
-            label_count,
-            prop_count,
-        })
+        let label_count = u16::from_le_bytes(data[2..4].try_into().unwrap()) as usize;
+        let expected = Self::MIN_SIZE + label_count * 4;
+        if data.len() < expected {
+            return Err(crate::Error::Encoding(format!(
+                "NodeRecordValue too short for {label_count} labels: need {expected}, got {}",
+                data.len()
+            )));
+        }
+        let mut label_ids = Vec::with_capacity(label_count);
+        for i in 0..label_count {
+            let offset = 4 + i * 4;
+            label_ids.push(u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()));
+        }
+        Ok(Self { flags, label_ids })
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -157,8 +164,7 @@ mod tests {
         // given
         let val = NodeRecordValue {
             flags: 0,
-            label_count: 2,
-            prop_count: 5,
+            label_ids: vec![0, 1, 5],
         };
 
         // when
@@ -170,12 +176,22 @@ mod tests {
     }
 
     #[test]
+    fn should_roundtrip_node_record_value_no_labels() {
+        let val = NodeRecordValue {
+            flags: 0,
+            label_ids: vec![],
+        };
+        let encoded = val.encode();
+        let decoded = NodeRecordValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
     fn should_detect_deleted_node() {
         // given
         let val = NodeRecordValue {
             flags: FLAG_DELETED,
-            label_count: 0,
-            prop_count: 0,
+            label_ids: vec![],
         };
 
         // then

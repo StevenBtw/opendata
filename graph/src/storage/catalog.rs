@@ -112,6 +112,10 @@ impl Catalog {
 
     // --- Property Keys ---
 
+    pub fn get_prop_key_name(&self, id: u32) -> Option<&ArcStr> {
+        self.prop_keys.get_name(id)
+    }
+
     pub fn get_prop_key_id(&self, name: &str) -> Option<u32> {
         self.prop_keys.get_id(name)
     }

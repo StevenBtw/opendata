@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arcstr::ArcStr;
-use bytes::Bytes;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
@@ -50,20 +49,59 @@ impl GraphStore for SlateGraphStore {
         })
     }
 
-    fn get_node_versioned(&self, id: NodeId, _epoch: EpochId, _tx_id: TxId) -> Option<Node> {
-        // Simplified: return latest version. Full MVCC epoch filtering deferred.
-        self.get_node(id)
+    fn get_node_versioned(&self, id: NodeId, epoch: EpochId, _tx_id: TxId) -> Option<Node> {
+        self.exec(async {
+            let records = self.storage.scan(NodeRecordKey::node_prefix(id.0)).await?;
+            Ok(records)
+        })
+        .ok()
+        .and_then(|records| {
+            // Find the latest version with epoch <= requested epoch.
+            // Records are sorted by epoch ascending (BE encoding).
+            let visible = records
+                .iter()
+                .filter(|r| {
+                    NodeRecordKey::decode(&r.key)
+                        .map(|k| k.epoch <= epoch.0)
+                        .unwrap_or(false)
+                })
+                .last()?;
+            let val = NodeRecordValue::decode(&visible.value).ok()?;
+            if val.is_deleted() {
+                return None;
+            }
+            self.build_node(id).ok().flatten()
+        })
     }
 
-    fn get_edge_versioned(&self, id: EdgeId, _epoch: EpochId, _tx_id: TxId) -> Option<Edge> {
-        // Simplified: return latest version. Full MVCC epoch filtering deferred.
-        self.get_edge(id)
+    fn get_edge_versioned(&self, id: EdgeId, epoch: EpochId, _tx_id: TxId) -> Option<Edge> {
+        self.exec(async {
+            let records = self.storage.scan(EdgeRecordKey::edge_prefix(id.0)).await?;
+            Ok(records)
+        })
+        .ok()
+        .and_then(|records| {
+            let visible = records
+                .iter()
+                .filter(|r| {
+                    EdgeRecordKey::decode(&r.key)
+                        .map(|k| k.epoch <= epoch.0)
+                        .unwrap_or(false)
+                })
+                .last()?;
+            let val = EdgeRecordValue::decode(&visible.value).ok()?;
+            if val.is_deleted() {
+                return None;
+            }
+            self.build_edge(id, &val).ok()
+        })
     }
 
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
+        let prop_key_id = self.catalog.read().get_prop_key_id(key.as_str())?;
         let prop_key = NodePropertyKey {
             node_id: id.0,
-            prop_key: bytes::Bytes::copy_from_slice(key.as_str().as_bytes()),
+            prop_key_id,
         };
         self.exec(async { self.storage.get(prop_key.encode()).await })
             .ok()
@@ -72,9 +110,10 @@ impl GraphStore for SlateGraphStore {
     }
 
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
+        let prop_key_id = self.catalog.read().get_prop_key_id(key.as_str())?;
         let prop_key = EdgePropertyKey {
             edge_id: id.0,
-            prop_key: bytes::Bytes::copy_from_slice(key.as_str().as_bytes()),
+            prop_key_id,
         };
         self.exec(async { self.storage.get(prop_key.encode()).await })
             .ok()
@@ -167,11 +206,8 @@ impl GraphStore for SlateGraphStore {
                 self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
         {
             for record in &records {
-                if let Ok(key) = ForwardAdjKey::decode(&record.key)
-                    && record.value.len() >= 8
-                {
-                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                    result.push((NodeId(key.dst), EdgeId(edge_id)));
+                if let Ok(key) = ForwardAdjKey::decode(&record.key) {
+                    result.push((NodeId(key.dst), EdgeId(key.edge_id)));
                 }
             }
         }
@@ -182,11 +218,8 @@ impl GraphStore for SlateGraphStore {
                 self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
         {
             for record in &records {
-                if let Ok(key) = BackwardAdjKey::decode(&record.key)
-                    && record.value.len() >= 8
-                {
-                    let edge_id = u64::from_le_bytes(record.value[..8].try_into().unwrap());
-                    result.push((NodeId(key.src), EdgeId(edge_id)));
+                if let Ok(key) = BackwardAdjKey::decode(&record.key) {
+                    result.push((NodeId(key.src), EdgeId(key.edge_id)));
                 }
             }
         }
@@ -444,31 +477,38 @@ impl SlateGraphStore {
     }
 
     fn load_node_properties(&self, node_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        self.load_properties(NodePropertyKey::node_prefix(node_id), |key| {
-            NodePropertyKey::decode(key).ok().map(|k| k.prop_key)
-        })
+        let records = self.exec(async {
+            self.storage
+                .scan(NodePropertyKey::node_prefix(node_id))
+                .await
+        })?;
+        let catalog = self.catalog.read();
+        let mut props = FxHashMap::default();
+        for record in &records {
+            if let Ok(key) = NodePropertyKey::decode(&record.key)
+                && let Some(name) = catalog.get_prop_key_name(key.prop_key_id)
+                && let Ok(val) = values::decode_value(&record.value)
+            {
+                props.insert(PropertyKey::new(name.as_str()), val);
+            }
+        }
+        Ok(props)
     }
 
     fn load_edge_properties(&self, edge_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        self.load_properties(EdgePropertyKey::edge_prefix(edge_id), |key| {
-            EdgePropertyKey::decode(key).ok().map(|k| k.prop_key)
-        })
-    }
-
-    /// Loads all properties from a scan range, using `extract_key` to get the property key bytes.
-    fn load_properties(
-        &self,
-        range: common::BytesRange,
-        extract_key: impl Fn(&[u8]) -> Option<Bytes>,
-    ) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        let records = self.exec(async { self.storage.scan(range).await })?;
+        let records = self.exec(async {
+            self.storage
+                .scan(EdgePropertyKey::edge_prefix(edge_id))
+                .await
+        })?;
+        let catalog = self.catalog.read();
         let mut props = FxHashMap::default();
         for record in &records {
-            if let Some(prop_bytes) = extract_key(&record.key)
+            if let Ok(key) = EdgePropertyKey::decode(&record.key)
+                && let Some(name) = catalog.get_prop_key_name(key.prop_key_id)
                 && let Ok(val) = values::decode_value(&record.value)
             {
-                let prop_key = PropertyKey::new(std::str::from_utf8(&prop_bytes).unwrap_or(""));
-                props.insert(prop_key, val);
+                props.insert(PropertyKey::new(name.as_str()), val);
             }
         }
         Ok(props)
@@ -490,25 +530,28 @@ impl SlateGraphStore {
             .collect()
     }
 
-    /// Loads all labels for a node by scanning the label index in reverse.
+    /// Loads labels for a node from the inline label IDs in the NodeRecord.
     fn load_node_labels(&self, node_id: u64) -> crate::Result<Vec<ArcStr>> {
-        // Scan all label index entries to find which labels contain this node.
-        // This is O(labels * nodes_per_label) in the worst case, but label counts
-        // are typically small (< 100). A reverse index (node -> label_ids) could
-        // optimize this if needed.
-        let catalog = self.catalog.read();
-        let mut labels = Vec::new();
+        let records = self.exec(async {
+            self.storage
+                .scan(NodeRecordKey::node_prefix(node_id))
+                .await
+        })?;
 
-        for label_id in 0..catalog.label_count() as u32 {
-            let key = LabelIndexKey { label_id, node_id }.encode();
-
-            if let Ok(Some(_)) = self.exec(async { self.storage.get(key).await })
-                && let Some(name) = catalog.get_label_name(label_id)
-            {
-                labels.push(name.clone());
-            }
+        let Some(record) = records.last() else {
+            return Ok(Vec::new());
+        };
+        let val = NodeRecordValue::decode(&record.value)?;
+        if val.is_deleted() {
+            return Ok(Vec::new());
         }
 
+        let catalog = self.catalog.read();
+        let labels = val
+            .label_ids
+            .iter()
+            .filter_map(|&id| catalog.get_label_name(id).cloned())
+            .collect();
         Ok(labels)
     }
 }

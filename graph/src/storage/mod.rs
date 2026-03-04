@@ -1,5 +1,5 @@
 mod catalog;
-pub(crate) mod merge_operator;
+pub mod merge_operator;
 mod reader;
 mod writer;
 

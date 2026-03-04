@@ -111,7 +111,6 @@ impl EdgeRecordKey {
         })
     }
 
-    #[cfg(test)]
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         decode_prefix(data, Self::SIZE, RecordType::EdgeRecord, "EdgeRecord")?;
         let edge_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
@@ -125,34 +124,33 @@ impl EdgeRecordKey {
 }
 
 // ---------------------------------------------------------------------------
-// NodePropertyKey: [ver][0x30][node_id:u64 BE][prop_key:terminated] = 10+ bytes
+// NodePropertyKey: [ver][0x30][node_id:u64 BE][prop_key_id:u32 BE] = 14 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodePropertyKey {
     pub node_id: u64,
-    pub prop_key: Bytes,
+    pub prop_key_id: u32,
 }
 
 impl NodePropertyKey {
+    const SIZE: usize = 14;
+
     pub fn encode(&self) -> Bytes {
-        encode_key(
-            RecordType::NodeProperty,
-            0,
-            10 + self.prop_key.len() + 2,
-            |buf| {
-                buf.put_u64(self.node_id);
-                terminated_bytes::serialize(&self.prop_key, buf);
-            },
-        )
+        encode_key(RecordType::NodeProperty, 0, Self::SIZE, |buf| {
+            buf.put_u64(self.node_id);
+            buf.put_u32(self.prop_key_id);
+        })
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
-        decode_prefix(data, 11, RecordType::NodeProperty, "NodeProperty")?;
+        decode_prefix(data, Self::SIZE, RecordType::NodeProperty, "NodeProperty")?;
         let node_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
-        let mut remaining = &data[10..];
-        let prop_key = terminated_bytes::deserialize(&mut remaining)?;
-        Ok(Self { node_id, prop_key })
+        let prop_key_id = u32::from_be_bytes(data[10..14].try_into().unwrap());
+        Ok(Self {
+            node_id,
+            prop_key_id,
+        })
     }
 
     pub fn node_prefix(node_id: u64) -> BytesRange {
@@ -161,34 +159,33 @@ impl NodePropertyKey {
 }
 
 // ---------------------------------------------------------------------------
-// EdgePropertyKey: [ver][0x40][edge_id:u64 BE][prop_key:terminated] = 10+ bytes
+// EdgePropertyKey: [ver][0x40][edge_id:u64 BE][prop_key_id:u32 BE] = 14 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgePropertyKey {
     pub edge_id: u64,
-    pub prop_key: Bytes,
+    pub prop_key_id: u32,
 }
 
 impl EdgePropertyKey {
+    const SIZE: usize = 14;
+
     pub fn encode(&self) -> Bytes {
-        encode_key(
-            RecordType::EdgeProperty,
-            0,
-            10 + self.prop_key.len() + 2,
-            |buf| {
-                buf.put_u64(self.edge_id);
-                terminated_bytes::serialize(&self.prop_key, buf);
-            },
-        )
+        encode_key(RecordType::EdgeProperty, 0, Self::SIZE, |buf| {
+            buf.put_u64(self.edge_id);
+            buf.put_u32(self.prop_key_id);
+        })
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
-        decode_prefix(data, 11, RecordType::EdgeProperty, "EdgeProperty")?;
+        decode_prefix(data, Self::SIZE, RecordType::EdgeProperty, "EdgeProperty")?;
         let edge_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
-        let mut remaining = &data[10..];
-        let prop_key = terminated_bytes::deserialize(&mut remaining)?;
-        Ok(Self { edge_id, prop_key })
+        let prop_key_id = u32::from_be_bytes(data[10..14].try_into().unwrap());
+        Ok(Self {
+            edge_id,
+            prop_key_id,
+        })
     }
 
     pub fn edge_prefix(edge_id: u64) -> BytesRange {
@@ -197,7 +194,7 @@ impl EdgePropertyKey {
 }
 
 // ---------------------------------------------------------------------------
-// ForwardAdjKey: [ver][0x50][src:u64 BE][type_id:u32 BE][dst:u64 BE] = 22 bytes
+// ForwardAdjKey: [ver][0x50][src:u64 BE][type_id:u32 BE][dst:u64 BE][edge_id:u64 BE] = 30 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,16 +202,18 @@ pub(crate) struct ForwardAdjKey {
     pub src: u64,
     pub edge_type_id: u32,
     pub dst: u64,
+    pub edge_id: u64,
 }
 
 impl ForwardAdjKey {
-    const SIZE: usize = 22;
+    const SIZE: usize = 30;
 
     pub fn encode(&self) -> Bytes {
         encode_key(RecordType::ForwardAdj, 0, Self::SIZE, |buf| {
             buf.put_u64(self.src);
             buf.put_u32(self.edge_type_id);
             buf.put_u64(self.dst);
+            buf.put_u64(self.edge_id);
         })
     }
 
@@ -223,10 +222,12 @@ impl ForwardAdjKey {
         let src = u64::from_be_bytes(data[2..10].try_into().unwrap());
         let edge_type_id = u32::from_be_bytes(data[10..14].try_into().unwrap());
         let dst = u64::from_be_bytes(data[14..22].try_into().unwrap());
+        let edge_id = u64::from_be_bytes(data[22..30].try_into().unwrap());
         Ok(Self {
             src,
             edge_type_id,
             dst,
+            edge_id,
         })
     }
 
@@ -236,7 +237,7 @@ impl ForwardAdjKey {
 }
 
 // ---------------------------------------------------------------------------
-// BackwardAdjKey: [ver][0x60][dst:u64 BE][type_id:u32 BE][src:u64 BE] = 22 bytes
+// BackwardAdjKey: [ver][0x60][dst:u64 BE][type_id:u32 BE][src:u64 BE][edge_id:u64 BE] = 30 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,16 +245,18 @@ pub(crate) struct BackwardAdjKey {
     pub dst: u64,
     pub edge_type_id: u32,
     pub src: u64,
+    pub edge_id: u64,
 }
 
 impl BackwardAdjKey {
-    const SIZE: usize = 22;
+    const SIZE: usize = 30;
 
     pub fn encode(&self) -> Bytes {
         encode_key(RecordType::BackwardAdj, 0, Self::SIZE, |buf| {
             buf.put_u64(self.dst);
             buf.put_u32(self.edge_type_id);
             buf.put_u64(self.src);
+            buf.put_u64(self.edge_id);
         })
     }
 
@@ -262,10 +265,12 @@ impl BackwardAdjKey {
         let dst = u64::from_be_bytes(data[2..10].try_into().unwrap());
         let edge_type_id = u32::from_be_bytes(data[10..14].try_into().unwrap());
         let src = u64::from_be_bytes(data[14..22].try_into().unwrap());
+        let edge_id = u64::from_be_bytes(data[22..30].try_into().unwrap());
         Ok(Self {
             dst,
             edge_type_id,
             src,
+            edge_id,
         })
     }
 
@@ -548,20 +553,22 @@ mod tests {
     fn should_roundtrip_node_property_key() {
         let key = NodePropertyKey {
             node_id: 42,
-            prop_key: Bytes::from("name"),
+            prop_key_id: 7,
         };
         let encoded = key.encode();
         assert_eq!(NodePropertyKey::decode(&encoded).unwrap(), key);
+        assert_eq!(encoded.len(), NodePropertyKey::SIZE);
     }
 
     #[test]
     fn should_roundtrip_edge_property_key() {
         let key = EdgePropertyKey {
             edge_id: 99,
-            prop_key: Bytes::from("weight"),
+            prop_key_id: 3,
         };
         let encoded = key.encode();
         assert_eq!(EdgePropertyKey::decode(&encoded).unwrap(), key);
+        assert_eq!(encoded.len(), EdgePropertyKey::SIZE);
     }
 
     #[test]
@@ -570,6 +577,7 @@ mod tests {
             src: 1,
             edge_type_id: 5,
             dst: 2,
+            edge_id: 100,
         };
         let encoded = key.encode();
         assert_eq!(ForwardAdjKey::decode(&encoded).unwrap(), key);
@@ -582,6 +590,7 @@ mod tests {
             dst: 2,
             edge_type_id: 5,
             src: 1,
+            edge_id: 100,
         };
         let encoded = key.encode();
         assert_eq!(BackwardAdjKey::decode(&encoded).unwrap(), key);
@@ -654,34 +663,48 @@ mod tests {
     }
 
     #[test]
-    fn should_order_forward_adj_by_src_type_dst() {
+    fn should_order_forward_adj_by_src_type_dst_edge() {
         let k1 = ForwardAdjKey {
             src: 1,
             edge_type_id: 1,
             dst: 10,
+            edge_id: 1,
         }
         .encode();
         let k2 = ForwardAdjKey {
             src: 1,
             edge_type_id: 1,
             dst: 20,
+            edge_id: 2,
         }
         .encode();
         let k3 = ForwardAdjKey {
             src: 1,
             edge_type_id: 2,
             dst: 5,
+            edge_id: 3,
         }
         .encode();
         let k4 = ForwardAdjKey {
             src: 2,
             edge_type_id: 1,
             dst: 1,
+            edge_id: 4,
         }
         .encode();
         assert!(k1 < k2, "same src+type, dst 10 < dst 20");
         assert!(k2 < k3, "same src, type 1 < type 2");
         assert!(k3 < k4, "src 1 < src 2");
+
+        // Multi-edges: same src+type+dst, different edge_id
+        let k5 = ForwardAdjKey {
+            src: 1,
+            edge_type_id: 1,
+            dst: 10,
+            edge_id: 100,
+        }
+        .encode();
+        assert!(k1 < k5, "same src+type+dst, edge_id 1 < edge_id 100");
     }
 
     #[test]
@@ -719,24 +742,26 @@ mod tests {
         .encode();
         let nprop = NodePropertyKey {
             node_id: 0,
-            prop_key: Bytes::from("a"),
+            prop_key_id: 0,
         }
         .encode();
         let eprop = EdgePropertyKey {
             edge_id: 0,
-            prop_key: Bytes::from("a"),
+            prop_key_id: 0,
         }
         .encode();
         let fwd = ForwardAdjKey {
             src: 0,
             edge_type_id: 0,
             dst: 0,
+            edge_id: 0,
         }
         .encode();
         let bwd = BackwardAdjKey {
             dst: 0,
             edge_type_id: 0,
             src: 0,
+            edge_id: 0,
         }
         .encode();
         let label = LabelIndexKey {
@@ -800,7 +825,8 @@ mod tests {
                 &ForwardAdjKey {
                     src: 10,
                     edge_type_id: 1,
-                    dst: 20
+                    dst: 20,
+                    edge_id: 1,
                 }
                 .encode()
             )
@@ -810,7 +836,8 @@ mod tests {
                 &ForwardAdjKey {
                     src: 10,
                     edge_type_id: 99,
-                    dst: 999
+                    dst: 999,
+                    edge_id: 42,
                 }
                 .encode()
             )
@@ -820,7 +847,8 @@ mod tests {
                 &ForwardAdjKey {
                     src: 11,
                     edge_type_id: 1,
-                    dst: 1
+                    dst: 1,
+                    edge_id: 1,
                 }
                 .encode()
             )
@@ -860,12 +888,23 @@ mod tests {
     }
 
     #[test]
-    fn should_property_key_handle_special_chars() {
-        let key = NodePropertyKey {
+    fn should_order_node_property_by_node_then_prop_key_id() {
+        let k1 = NodePropertyKey {
             node_id: 1,
-            prop_key: Bytes::from_static(&[0x00, 0x01, 0xFF]),
-        };
-        let encoded = key.encode();
-        assert_eq!(NodePropertyKey::decode(&encoded).unwrap(), key);
+            prop_key_id: 0,
+        }
+        .encode();
+        let k2 = NodePropertyKey {
+            node_id: 1,
+            prop_key_id: 1,
+        }
+        .encode();
+        let k3 = NodePropertyKey {
+            node_id: 2,
+            prop_key_id: 0,
+        }
+        .encode();
+        assert!(k1 < k2, "same node, prop_key_id 0 < 1");
+        assert!(k2 < k3, "node 1 < node 2");
     }
 }
