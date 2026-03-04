@@ -29,7 +29,7 @@ layout and optimizations.
 - **[Timeseries](timeseries/README.md)**: Object-store-native timeseries. Prometheus remote-write compatible.
 - **[Log](log/README.md)**: Event streaming with a replayable log per key.
 - **[Vector](vector/README.md)**: SPANN-style ANN search. Centroids in memory, posting lists on disk.
-- **[KeyValue](keyvalue/README.md)**: Object-store-native key-value database.
+- **[Graph](graph/README.md)**: Labeled property graph with GQL queries.
 
 # Roadmap
 

@@ -341,7 +341,7 @@ node coexist in the LSM tree, and the reader selects the version visible at its 
 ┌────────────────────────────────────────────────────────┐
 │                    NodeRecordValue                      │
 ├────────────────────────────────────────────────────────┤
-│  flags:       u8                                       │
+│  flags:       u16 (LE)                                 │
 │  label_count: u16 (LE)                                 │
 │  label_ids:   FixedElementArray<u32 LE>                │
 │               (label_count elements)                   │
@@ -350,10 +350,10 @@ node coexist in the LSM tree, and the reader selects the version visible at its 
 
 **Flags:**
 
-| Bit | Name      | Description                              |
-|-----|-----------|------------------------------------------|
-| 0   | `DELETED` | Node was deleted at this epoch           |
-| 1-7 | reserved  | Must be 0                                |
+| Bit  | Name      | Description                              |
+|------|-----------|------------------------------------------|
+| 0    | `DELETED` | Node was deleted at this epoch           |
+| 1-15 | reserved  | Must be 0                                |
 
 **Structure:**
 
@@ -395,7 +395,7 @@ Stores the existence of an edge, its source and destination nodes, edge type, an
 ┌────────────────────────────────────────────────────────┐
 │                    EdgeRecordValue                      │
 ├────────────────────────────────────────────────────────┤
-│  flags:        u8                                      │
+│  flags:        u16 (LE)                                │
 │  src_node_id:  u64 (LE)                                │
 │  dst_node_id:  u64 (LE)                                │
 │  edge_type_id: u32 (LE)                                │
