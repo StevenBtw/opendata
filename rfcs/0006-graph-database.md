@@ -101,7 +101,8 @@ default and mandatory interface.
 Other OpenData engines depend on external specialized crates: timeseries uses `promql-parser`
 (PromQL query parsing) and `tsz` (time series compression), vector uses `usearch` (HNSW
 similarity search). The graph engine follows the same pattern, using Grafeo for graph-specific
-query parsing and execution.
+query parsing and execution. This could be internalized at a later moment, but would require a
+significant amount of work to be done correctly (pruning, new integration tests, etc.).
 
 ## Design
 
