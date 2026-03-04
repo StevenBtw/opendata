@@ -4,15 +4,20 @@
 //! interacting with OpenData TimeSeries. It exposes write operations for
 //! ingesting time series data.
 
+use std::ops::RangeBounds;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use common::{StorageRuntime, StorageSemantics, create_storage};
 
 use crate::config::Config;
-use crate::error::Result;
-use crate::model::Series;
+use crate::error::{QueryError, Result};
+use crate::model::{Labels, MetricMetadata, QueryValue, RangeSample, Series};
 use crate::storage::merge_operator::OpenTsdbMergeOperator;
-use crate::tsdb::Tsdb;
+use crate::tsdb::{
+    Tsdb, TsdbReadEngine, eval_query_range_bounds, find_label_values_in_range,
+    find_labels_in_range, find_series_in_range,
+};
 
 /// A time series database for storing and querying metrics.
 ///
@@ -22,22 +27,23 @@ use crate::tsdb::Tsdb;
 ///
 /// # Example
 ///
-/// ```ignore
-/// use timeseries::{TimeSeriesDb, Config, Series};
+/// ```
+/// # use timeseries::{TimeSeriesDb, Config, Series};
+/// # use common::StorageConfig;
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = Config { storage: StorageConfig::InMemory, ..Default::default() };
+/// let ts = TimeSeriesDb::open(config).await?;
 ///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let ts = TimeSeriesDb::open(Config::default()).await?;
+/// let series = Series::builder("http_requests_total")
+///     .label("method", "GET")
+///     .label("status", "200")
+///     .sample_now(1.0)
+///     .build();
 ///
-///     let series = Series::builder("http_requests_total")
-///         .label("method", "GET")
-///         .label("status", "200")
-///         .sample_now(1.0)
-///         .build();
-///
-///     ts.write(vec![series]).await?;
-///     Ok(())
-/// }
+/// ts.write(vec![series]).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct TimeSeriesDb {
     // Internal Tsdb - not exposed
@@ -60,10 +66,15 @@ impl TimeSeriesDb {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use timeseries::{TimeSeriesDb, Config};
-    ///
-    /// let ts = TimeSeriesDb::open(Config::default()).await?;
+    /// ```
+    /// # use timeseries::{TimeSeriesDb, Config};
+    /// # use common::StorageConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = Config { storage: StorageConfig::InMemory, ..Default::default() };
+    /// let ts = TimeSeriesDb::open(config).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn open(config: Config) -> Result<Self> {
         let storage = create_storage(
@@ -101,7 +112,13 @@ impl TimeSeriesDb {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use timeseries::{TimeSeriesDb, Config, Series};
+    /// # use common::StorageConfig;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = Config { storage: StorageConfig::InMemory, ..Default::default() };
+    /// # let ts = TimeSeriesDb::open(config).await?;
     /// let series = vec![
     ///     Series::builder("cpu_usage")
     ///         .label("host", "server1")
@@ -115,9 +132,80 @@ impl TimeSeriesDb {
     /// ];
     ///
     /// ts.write(series).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn write(&self, series: Vec<Series>) -> Result<()> {
         self.tsdb.ingest_samples(series).await
+    }
+
+    // ── Read / Query API (RFC 0003) ──────────────────────────────────
+
+    /// Evaluates an instant PromQL query at a single point in time.
+    ///
+    /// If `time` is `None`, the current wall-clock time is used.
+    pub async fn query(
+        &self,
+        query: &str,
+        time: Option<SystemTime>,
+    ) -> std::result::Result<QueryValue, QueryError> {
+        self.tsdb
+            .eval_query(query, time, &crate::model::QueryOptions::default())
+            .await
+    }
+
+    /// Evaluates a range PromQL query over a time interval.
+    pub async fn query_range(
+        &self,
+        query: &str,
+        range: impl RangeBounds<SystemTime>,
+        step: Duration,
+    ) -> std::result::Result<Vec<RangeSample>, QueryError> {
+        // Route through shared range helpers so bound conversion happens once.
+        eval_query_range_bounds(
+            &self.tsdb,
+            query,
+            range,
+            step,
+            &crate::model::QueryOptions::default(),
+        )
+        .await
+    }
+
+    /// Returns the set of label-sets matching the given series matchers.
+    pub async fn series(
+        &self,
+        matchers: &[&str],
+        range: impl RangeBounds<SystemTime>,
+    ) -> std::result::Result<Vec<Labels>, QueryError> {
+        find_series_in_range(&self.tsdb, matchers, range).await
+    }
+
+    /// Returns the set of label names matching the given matchers.
+    pub async fn labels(
+        &self,
+        matchers: Option<&[&str]>,
+        range: impl RangeBounds<SystemTime>,
+    ) -> std::result::Result<Vec<String>, QueryError> {
+        find_labels_in_range(&self.tsdb, matchers, range).await
+    }
+
+    /// Returns the set of values for a given label name.
+    pub async fn label_values(
+        &self,
+        label_name: &str,
+        matchers: Option<&[&str]>,
+        range: impl RangeBounds<SystemTime>,
+    ) -> std::result::Result<Vec<String>, QueryError> {
+        find_label_values_in_range(&self.tsdb, label_name, matchers, range).await
+    }
+
+    /// Returns metric metadata, optionally filtered to a single metric.
+    pub async fn metadata(
+        &self,
+        metric: Option<&str>,
+    ) -> std::result::Result<Vec<MetricMetadata>, QueryError> {
+        self.tsdb.find_metadata(metric).await
     }
 
     /// Forces flush of all pending data to durable storage.

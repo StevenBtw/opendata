@@ -150,7 +150,15 @@ fn should_return_error_when_input_is_invalid() {
 cargo test --all                    # Run all tests
 cargo test --all -- --nocapture     # Run with output
 cargo test -p timeseries             # Run tests for a specific crate
+cargo test --all --all-features      # Match CI coverage
 ```
+
+## Pull Request Process
+
+1. Ensure formatting, clippy, and tests pass locally
+2. Keep commits focused and include tests/docs for behavior changes
+3. Open a PR with a clear summary, testing notes, and any RFC references
+4. Address review feedback and re-run checks before merge
 
 ## License
 
