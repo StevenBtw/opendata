@@ -813,29 +813,29 @@ mutation).
 **Value Schema:**
 
 ```text
-┌────────────────────────────────────────────────────────────────────┐
-│                      StatisticsValue                               │
-├────────────────────────────────────────────────────────────────────┤
-│  version:          u32 (LE)                                        │
-│  total_nodes:      u64 (LE)                                        │
-│  total_edges:      u64 (LE)                                        │
-│  label_stats:      Array<LabelStat>                                │
-│  edge_type_stats:  Array<EdgeTypeStat>                             │
-│                                                                    │
-│  LabelStat                                                         │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  label_id:   u32 (LE)                                        │  │
-│  │  count:      u64 (LE)                                        │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-│                                                                    │
-│  EdgeTypeStat                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  edge_type_id:  u32 (LE)                                     │  │
-│  │  count:         u64 (LE)                                      │  │
-│  │  avg_out_deg:   f64 (LE)                                      │  │
-│  │  avg_in_deg:    f64 (LE)                                      │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│             StatisticsValue              │
+├──────────────────────────────────────────┤
+│  version:          u32 (LE)              │
+│  total_nodes:      u64 (LE)              │
+│  total_edges:      u64 (LE)              │
+│  label_stats:      Array<LabelStat>      │
+│  edge_type_stats:  Array<EdgeTypeStat>   │
+│                                          │
+│  LabelStat                               │
+│  ┌────────────────────────────────────┐  │
+│  │  label_id:   u32 (LE)              │  │
+│  │  count:      u64 (LE)              │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  EdgeTypeStat                            │
+│  ┌────────────────────────────────────┐  │
+│  │  edge_type_id:  u32 (LE)           │  │
+│  │  count:         u64 (LE)           │  │
+│  │  avg_out_deg:   f64 (LE)           │  │
+│  │  avg_in_deg:    f64 (LE)           │  │
+│  └────────────────────────────────────┘  │
+└──────────────────────────────────────────┘
 ```
 
 Statistics are recomputed periodically (e.g., every N commits) and persisted as a single record.
@@ -867,10 +867,10 @@ one for node IDs and one for edge IDs.
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│                     SeqBlockValue                       │
+│                     SeqBlockValue                      │
 ├────────────────────────────────────────────────────────┤
-│  base_sequence:  u64 (LE), start of allocated block   │
-│  block_size:     u64 (LE), number of IDs in block     │
+│  base_sequence:  u64 (LE), start of allocated block    │
+│  block_size:     u64 (LE), number of IDs in block      │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -883,30 +883,30 @@ is used in `NodeProperty`/`EdgeProperty` values and `ZoneMap` min/max fields.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│                          TaggedValue                                  │
+│                          TaggedValue                                 │
 ├──────────────────────────────────────────────────────────────────────┤
 │  tag: u8  (Value variant discriminant)                               │
 │  payload: (depends on tag)                                           │
 │                                                                      │
 │  0x00 Null       → (no payload)                                      │
-│  0x01 Bool       → u8 (0 = false, 1 = true)                         │
-│  0x02 Int64      → i64 (LE)                                         │
-│  0x03 Float64    → f64 (LE)                                         │
+│  0x01 Bool       → u8 (0 = false, 1 = true)                          │
+│  0x02 Int64      → i64 (LE)                                          │
+│  0x03 Float64    → f64 (LE)                                          │
 │  0x04 String     → Utf8                                              │
-│  0x05 Bytes      → len: u32 (LE), payload: [u8; len]                │
-│  0x06 Timestamp  → i64 (LE) microseconds since Unix epoch           │
-│  0x07 Date       → i32 (LE) days since Unix epoch                   │
-│  0x08 Time       → i64 (LE) nanoseconds since midnight,             │
+│  0x05 Bytes      → len: u32 (LE), payload: [u8; len]                 │
+│  0x06 Timestamp  → i64 (LE) microseconds since Unix epoch            │
+│  0x07 Date       → i32 (LE) days since Unix epoch                    │
+│  0x08 Time       → i64 (LE) nanoseconds since midnight,              │
 │                    has_offset: u8, offset: i32 (LE) seconds          │
-│  0x09 Duration   → months: i32 (LE), days: i32 (LE),               │
+│  0x09 Duration   → months: i32 (LE), days: i32 (LE),                 │
 │                    nanos: i64 (LE)                                   │
-│  0x0A ZonedDT    → micros: i64 (LE), offset_secs: i32 (LE)         │
-│  0x0B List       → count: u32 (LE), elements: [TaggedValue; count]  │
-│  0x0C Map        → count: u32 (LE),                                 │
+│  0x0A ZonedDT    → micros: i64 (LE), offset_secs: i32 (LE)           │
+│  0x0B List       → count: u32 (LE), elements: [TaggedValue; count]   │
+│  0x0C Map        → count: u32 (LE),                                  │
 │                    entries: [(Utf8 key, TaggedValue value); count]   │
-│  0x0D Vector     → dims: u32 (LE), elements: [f32 LE; dims]        │
-│  0x0E Path       → node_count: u32 (LE), nodes: [TaggedValue],     │
-│                    edge_count: u32 (LE), edges: [TaggedValue]       │
+│  0x0D Vector     → dims: u32 (LE), elements: [f32 LE; dims]          │
+│  0x0E Path       → node_count: u32 (LE), nodes: [TaggedValue],       │
+│                    edge_count: u32 (LE), edges: [TaggedValue]        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
