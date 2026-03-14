@@ -10,11 +10,12 @@
 
 This RFC defines the storage model for a labeled property graph (LPG) database built on
 [SlateDB](https://github.com/slatedb/slatedb). The graph database integrates
-[Grafeo](https://github.com/GrafeoDB/grafeo) (v0.5.18) as its query engine, implementing Grafeo's
+[Grafeo](https://github.com/GrafeoDB/grafeo) (v0.5.22) as its query engine, implementing Grafeo's
 `GraphStore` and `GraphStoreMut` traits over SlateDB's ordered key-value interface. The design maps
 graph primitives: nodes, edges, labels, properties and adjacency, to SlateDB records using the
 standard 2-byte key prefix, with additional index structures for label lookups, property searches,
-and traversal. MVCC is provided through epoch-based versioning of entity records.
+and traversal. Concurrency control is delegated to SlateDB's built-in transaction support with
+snapshot isolation.
 
 ## Motivation
 
@@ -31,16 +32,15 @@ The storage design must support:
    operation. Adjacency must be stored in a layout that enables fast, direction-aware traversal
    without loading unrelated data.
 
-2. **Point lookups**: Retrieving a node or edge by ID must be efficient via a direct key seek. The
-   query engine issues point lookups during pattern matching and result materialization. Entity
-   lookups are O(v) where v is the number of MVCC versions for that entity (typically 1-2, kept
-   small by garbage collection).
+2. **Point lookups**: Retrieving a node or edge by ID must be O(1) via a direct key lookup. The
+   query engine issues point lookups during pattern matching and result materialization.
 
 3. **Label and property indexing**: GQL queries filter nodes by label (`MATCH (n:Person)`) and by
    property values (`WHERE n.age > 30`). Without indexes, these require full scans.
 
-4. **MVCC for concurrent reads and writes**: The query engine expects snapshot isolation. Readers
-   must see a consistent view while writers mutate the graph concurrently.
+4. **Concurrent reads and writes**: Readers must see a consistent view while writers mutate the
+   graph concurrently. SlateDB's snapshot isolation provides this guarantee without a custom MVCC
+   layer.
 
 5. **Schema catalog persistence**: Grafeo maps label names, edge type names, and property key
    names to compact integer IDs for internal processing. This catalog must survive restarts.
@@ -56,8 +56,8 @@ The storage design must support:
 - Define the catalog persistence format for labels, edge types, and property keys
 - Define adjacency index layout for directional traversal
 - Define label and property index layouts for filtered scans
-- Define the MVCC epoch model for snapshot isolation
-- Define merge operators for atomic counter updates and zone map maintenance
+- Define merge operators for atomic counter updates
+- Define the concurrency model: delegated to SlateDB transactions
 
 ## Non-Goals (left for future RFCs)
 
@@ -78,12 +78,12 @@ The graph engine introduces the following external crate dependencies:
 
 | Crate            | Version | Role                                                                                                                                     |
 |------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------|
-| `grafeo-core`    | 0.5.18  | Graph storage traits (`GraphStore`, `GraphStoreMut`), core types (`Node`, `Edge`, `NodeId`, `EdgeId`, `Value`, `PropertyKey`)            |
-| `grafeo-common`  | 0.5.18  | Shared primitives (`NodeId`, `EdgeId`, `EpochId`, `Value` enum, MVCC types)                                                              |
-| `grafeo-engine`  | 0.5.18  | Query engine: GQL parser, cost-based optimizer, push-based vectorized executor. GQL is the primary query interface and is always enabled |
+| `grafeo-core`    | 0.5.22  | Graph storage traits (`GraphStore`, `GraphStoreMut`), core types (`Node`, `Edge`, `NodeId`, `EdgeId`, `Value`, `PropertyKey`)            |
+| `grafeo-common`  | 0.5.22  | Shared primitives (`NodeId`, `EdgeId`, `EpochId`, `Value` enum)                                                                          |
+| `grafeo-engine`  | 0.5.22  | Query engine: GQL parser, cost-based optimizer, push-based vectorized executor. GQL is the primary query interface and is always enabled |
 
 Grafeo is published on crates.io. All three crates are required dependencies. The graph database
-always includes the GQL query engine, there is no "storage-only" deployment mode. Additional query
+always includes the GQL query engine; there is no "storage-only" deployment mode. Additional query
 languages (Cypher, SPARQL, etc.) may be added as optional features in the future, but GQL is the
 default and mandatory interface.
 
@@ -111,8 +111,9 @@ significant amount of work to be done correctly (pruning, new integration tests,
 Each graph database instance corresponds to a single SlateDB instance. Graph entities (nodes,
 edges), their properties, adjacency indexes, label indexes, property indexes, and catalog
 dictionaries are all stored as key-value pairs in the LSM tree. Grafeo's query engine operates
-on an in-memory `SlateGraphStore` adapter that translates trait method calls into SlateDB reads and
-writes.
+on a `SlateGraphStore` adapter that translates trait method calls into SlateDB reads and writes.
+Concurrency control is delegated to SlateDB's built-in transaction support, the adapter does not
+maintain its own MVCC layer.
 
 ```ascii
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -132,17 +133,19 @@ writes.
 │   │   Implements GraphStore (reads) + GraphStoreMut (writes)     │   │
 │   │   Translates trait calls → SlateDB get/put/delete/scan       │   │
 │   │                                                              │   │
+│   │   Read-then-write ops use StorageTransaction (atomicity)     │   │
+│   │   Write-only ops use WriteBatch via Storage::apply()         │   │
+│   │                                                              │   │
 │   │   In-memory components:                                      │   │
 │   │   ├─ Catalog cache (label/type/property-key dictionaries)    │   │
-│   │   ├─ Statistics (cardinality estimates, degree histograms)   │   │
-│   │   └─ Zone maps (property min/max for skip pruning)           │   │
+│   │   └─ Statistics (cardinality estimates)                      │   │
 │   └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
 │   ┌──────────────────────────▼───────────────────────────────────┐   │
 │   │                    Record Layout                             │   │
 │   │                                                              │   │
-│   │   NodeRecord    (0x10)  ─ Node existence + epoch             │   │
-│   │   EdgeRecord    (0x20)  ─ Edge endpoints + type + epoch      │   │
+│   │   NodeRecord    (0x10)  ─ Node existence + labels            │   │
+│   │   EdgeRecord    (0x20)  ─ Edge endpoints + type              │   │
 │   │   NodeProperty  (0x30)  ─ Per-node property values           │   │
 │   │   EdgeProperty  (0x40)  ─ Per-edge property values           │   │
 │   │   ForwardAdj    (0x50)  ─ Outgoing adjacency index           │   │
@@ -150,21 +153,22 @@ writes.
 │   │   LabelIndex    (0x70)  ─ Label → node ID index              │   │
 │   │   PropertyIndex (0x80)  ─ Property value → node ID index     │   │
 │   │   Catalog       (0x90)  ─ Name ↔ ID dictionaries             │   │
-│   │   Metadata      (0xE0)  ─ Counters, epoch, statistics        │   │
+│   │   Metadata      (0xE0)  ─ Counters (node count, edge count)  │   │
 │   │   SeqBlock      (0xF0)  ─ ID allocation state                │   │
 │   └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
 │   Storage: SlateDB (LSM KV Store)                                    │
 │   (all graph data as ordered key-value pairs)                        │
+│   (transactions with snapshot isolation for concurrency control)     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Background on Grafeo's Storage Traits
 
-Grafeo's `GraphStore` trait defines the read interface: point lookups by ID, versioned lookups
-for MVCC, individual property access (with batch/selective variants for projection pushdown),
-directional traversal (`Outgoing`/`Incoming`/`Both`), label-filtered scans, property-filtered
-searches, zone map skip pruning, and statistics for the cost-based optimizer.
+Grafeo's `GraphStore` trait defines the read interface: point lookups by ID, individual property
+access (with batch/selective variants for projection pushdown), directional traversal
+(`Outgoing`/`Incoming`/`Both`), label-filtered scans, property-filtered searches, zone map skip
+pruning, and statistics for the cost-based optimizer.
 
 `GraphStoreMut` extends `GraphStore` with mutations: create/delete nodes and edges, set/remove
 properties, add/remove labels, and batch edge creation.
@@ -177,7 +181,6 @@ The following Grafeo types are serialized to/from SlateDB records:
 |----------------------|------------------------------------|----------|
 | `NodeId(u64)`        | Node identifier                    | 8 bytes  |
 | `EdgeId(u64)`        | Edge identifier                    | 8 bytes  |
-| `EpochId(u64)`       | MVCC epoch                         | 8 bytes  |
 | `LabelId(u32)`       | Label dictionary ID                | 4 bytes  |
 | `EdgeTypeId(u32)`    | Edge type dictionary ID            | 4 bytes  |
 | `PropertyKeyId(u32)` | Property key dictionary ID         | 4 bytes  |
@@ -249,41 +252,39 @@ Key encodings use the primitives defined in [RFC 0004](../../rfcs/0004-common-en
 
 | Tag    | Name               | Description                                             |
 |--------|--------------------|---------------------------------------------------------|
-| `0x10` | `NodeRecord`       | Node existence, label list, and MVCC epoch              |
-| `0x20` | `EdgeRecord`       | Edge endpoints, type, and MVCC epoch                    |
+| `0x10` | `NodeRecord`       | Node existence and label list                           |
+| `0x20` | `EdgeRecord`       | Edge endpoints and type                                 |
 | `0x30` | `NodeProperty`     | Property key-value pair for a node                      |
 | `0x40` | `EdgeProperty`     | Property key-value pair for an edge                     |
 | `0x50` | `ForwardAdj`       | Outgoing adjacency: src -> (edge_type, dst, edge_id)    |
 | `0x60` | `BackwardAdj`      | Incoming adjacency: dst -> (edge_type, src, edge_id)    |
 | `0x70` | `LabelIndex`       | Label -> node ID mapping for label scans                |
 | `0x80` | `PropertyIndex`    | Sortable property value -> node ID for filtered search  |
-| `0x9_` | `Catalog`          | Name ↔ ID dictionaries (6 sub-types via reserved bits) |
-| `0xB0` | `ZoneMap`          | Per-property min/max for skip pruning                   |
-| `0xE0` | `Metadata`         | Global counters (node count, edge count, current epoch) |
-| `0xE1` | `Statistics`       | Cardinality estimates, degree histograms                |
+| `0x9_` | `Catalog`          | Name-to-ID dictionaries (6 sub-types via reserved bits) |
+| `0xE0` | `Metadata`         | Global counters (node count, edge count)                |
 | `0xF0` | `SeqBlock`         | Sequence allocation state for node/edge ID generation   |
 
 ## Record Definitions & Schemas
 
 ### `NodeRecord` (`0x10`)
 
-Stores the existence of a node, its labels, and the MVCC epoch at which it was created or last
-modified. The epoch is part of the key to enable version chains, multiple versions of the same
-node coexist in the LSM tree, and the reader selects the version visible at its snapshot epoch.
+Stores the existence of a node and its labels. Each node has exactly one `NodeRecord` key. Deletion
+removes the key entirely (SlateDB tombstone), rather than using a soft-delete flag.
 
 **Key Layout:**
 
 ```text
-┌─────────┬─────────────┬──────────┬──────────┐
-│ version │ record_tag  │ node_id  │  epoch   │
-│ 1 byte  │   1 byte    │ 8 bytes  │ 8 bytes  │
-└─────────┴─────────────┴──────────┴──────────┘
+┌─────────┬─────────────┬──────────┐
+│ version │ record_tag  │ node_id  │
+│ 1 byte  │   1 byte    │ 8 bytes  │
+└─────────┴─────────────┴──────────┘
 ```
+
+Total: 10 bytes.
 
 - `version` (u8): Key format version (currently `0x01`)
 - `record_tag` (u8): `0x10`
 - `node_id` (u64): Big-endian node identifier
-- `epoch` (u64): Big-endian MVCC epoch (higher = newer)
 
 **Value Schema:**
 
@@ -291,53 +292,38 @@ node coexist in the LSM tree, and the reader selects the version visible at its 
 ┌────────────────────────────────────────────────────────┐
 │                    NodeRecordValue                     │
 ├────────────────────────────────────────────────────────┤
-│  flags:       u16 (LE)                                 │
 │  label_count: u16 (LE)                                 │
-│  label_ids:   FixedElementArray<u32 LE>                │
-│               (label_count elements)                   │
+│  label_ids:   [u32 LE; label_count]                    │
 └────────────────────────────────────────────────────────┘
 ```
 
-**Flags:**
-
-| Bit  | Name      | Description                              |
-|------|-----------|------------------------------------------|
-| 0    | `DELETED` | Node was deleted at this epoch           |
-| 1-15 | reserved  | Must be 0                                |
-
 **Structure:**
 
-- When `DELETED` is set, the node was deleted at this epoch. `label_count` is 0 and `label_ids`
-  is empty. Readers seeing this flag treat the node as non-existent.
 - `label_ids` are catalog-assigned `LabelId` values. Label names are resolved via the catalog.
 - A node with no labels is valid (`label_count = 0`).
-- The epoch in the key enables MVCC: to read at epoch E, scan for the node_id prefix and select
-  the record with the highest epoch ≤ E that is not a deletion marker.
+- If the key does not exist in SlateDB, the node does not exist.
 
 **Point Lookup:**
 
-To retrieve a node by ID at epoch E:
-
-1. Seek to `[0x01, 0x10, node_id_be, 0x00..0x00]`
-2. Scan forward through versions until epoch > E
-3. Return the last version with epoch ≤ E
-4. If that version has `DELETED` flag, return `None`
+To retrieve a node by ID: direct `get()` on the encoded key. O(1).
 
 ### `EdgeRecord` (`0x20`)
 
-Stores the existence of an edge, its source and destination nodes, edge type, and MVCC epoch.
+Stores the existence of an edge, its source and destination nodes, and edge type. Each edge has
+exactly one `EdgeRecord` key. Deletion removes the key via SlateDB tombstone.
 
 **Key Layout:**
 
 ```text
-┌─────────┬─────────────┬──────────┬──────────┐
-│ version │ record_tag  │ edge_id  │  epoch   │
-│ 1 byte  │   1 byte    │ 8 bytes  │ 8 bytes  │
-└─────────┴─────────────┴──────────┴──────────┘
+┌─────────┬─────────────┬──────────┐
+│ version │ record_tag  │ edge_id  │
+│ 1 byte  │   1 byte    │ 8 bytes  │
+└─────────┴─────────────┴──────────┘
 ```
 
+Total: 10 bytes.
+
 - `edge_id` (u64): Big-endian edge identifier
-- `epoch` (u64): Big-endian MVCC epoch
 
 **Value Schema:**
 
@@ -348,20 +334,17 @@ Stores the existence of an edge, its source and destination nodes, edge type, an
 │  src_node_id:  u64 (LE)                                │
 │  dst_node_id:  u64 (LE)                                │
 │  edge_type_id: u32 (LE)                                │
-│  flags:        u16 (LE)                                │
 │  prop_count:   u16 (LE)                                │
 └────────────────────────────────────────────────────────┘
 ```
 
-Total: 24 bytes.
-
-**Flags:** Same as `NodeRecord` (bit 0 = `DELETED`).
+Total: 22 bytes.
 
 **Structure:**
 
 - `src_node_id` and `dst_node_id` are the endpoints of the directed edge.
 - `edge_type_id` is a catalog-assigned `EdgeTypeId`. The type name is resolved via the catalog.
-- Point lookup follows the same MVCC pattern as `NodeRecord`.
+- Point lookup is a direct `get()` on the encoded key. O(1).
 
 ### `NodeProperty` (`0x30`)
 
@@ -374,9 +357,6 @@ rather than as a single serialized map. This design enables:
 - **Batch property access**: The `get_nodes_properties_selective_batch` trait method benefits from
   targeted key lookups.
 
-Properties use last-write-wins semantics, there is no epoch in the property key. The property
-reflects the state after the most recent `set_node_property` or `remove_node_property` call.
-
 **Key Layout:**
 
 ```text
@@ -385,6 +365,8 @@ reflects the state after the most recent `set_node_property` or `remove_node_pro
 │ 1 byte  │   1 byte    │ 8 bytes  │    4 bytes      │
 └─────────┴─────────────┴──────────┴─────────────────┘
 ```
+
+Total: 14 bytes.
 
 - `node_id` (u64): Big-endian node identifier
 - `property_key_id` (u32): Big-endian catalog-assigned `PropertyKeyId`
@@ -410,7 +392,7 @@ record disappears entirely.
 **All Properties for a Node:**
 
 To load all properties for a node (e.g., for `get_node`), perform a prefix scan:
-`[0x01, 0x30, node_id_be]`, this returns all property records for that node, each keyed by
+`[0x01, 0x30, node_id_be]` — this returns all property records for that node, each keyed by
 `property_key_id`. Resolve property names via the catalog.
 
 ### `EdgeProperty` (`0x40`)
@@ -444,10 +426,7 @@ single `put` or `delete` without touching other adjacency entries.
 └─────────┴─────────────┴──────────────┴───────────────┴──────────────┴──────────┘
 ```
 
-- `src_node_id` (u64): Big-endian source node identifier
-- `edge_type_id` (u32): Big-endian edge type identifier
-- `dst_node_id` (u64): Big-endian destination node identifier
-- `edge_id` (u64): Big-endian edge identifier
+Total: 30 bytes.
 
 **Value Schema:** Empty (all information is in the key).
 
@@ -459,7 +438,9 @@ single `put` or `delete` without touching other adjacency entries.
     traversal)
   - `[prefix, src_node_id, edge_type_id, dst_node_id]`, check if a specific edge exists
 - Edge type is placed before destination to enable type-filtered traversal without loading all
-  edge types.
+  edge types. In GQL, edge patterns almost always specify a type: `MATCH (a)-[:KNOWS]->(b)` is
+  far more common than `MATCH (a)-[]->(b)`. For the untyped case the scan is still bounded to
+  one node's adjacency, not a global scan.
 - The `edge_id` suffix ensures uniqueness when multiple edges of the same type connect the same
   pair of nodes (multi-edges).
 
@@ -519,8 +500,7 @@ pair) to avoid read-modify-write on high-cardinality labels.
 └─────────┴─────────────┴───────────┴──────────┘
 ```
 
-- `label_id` (u32): Big-endian catalog-assigned `LabelId`
-- `node_id` (u64): Big-endian node identifier
+Total: 14 bytes.
 
 **Value Schema:** Empty.
 
@@ -533,18 +513,22 @@ To implement `nodes_by_label(label)`:
 3. Each key suffix is a `node_id`
 4. Return `Vec<NodeId>`
 
-**Cardinality Estimation:**
+**Why individual keys instead of bitmaps:**
 
-To implement `estimate_label_cardinality(label)`, the `Metadata` record stores per-label node
-counts maintained by merge operators (see Metadata section).
+A label like "Person" could apply to millions of nodes, and nodes gain or lose labels
+dynamically. Individual keys keep it simple: one PUT to add a label, one DELETE to remove it,
+no need to read current state. The trade-off is more keys in the tree, but since they all share
+a long common prefix (`[0x01, 0x70, label_id]`), SlateDB's prefix compression handles this well.
+If set operations become needed for query planning, bucketed bitmaps can be added later as a
+compaction-time optimization.
 
 ### `PropertyIndex` (`0x80`)
 
 An optional index mapping property values to node IDs. Enables `find_nodes_by_property`,
 `find_nodes_by_properties`, and `find_nodes_in_range` without full scans.
 
-Property indexes are created explicitly (via catalog index definitions). Only indexed properties
-have `PropertyIndex` entries.
+Property indexes are maintained automatically for all sortable property types. Only indexed
+properties have `PropertyIndex` entries.
 
 **Key Layout:**
 
@@ -554,10 +538,6 @@ have `PropertyIndex` entries.
 │ 1 byte  │   1 byte    │    4 bytes      │ SortableValue     │ 8 bytes  │
 └─────────┴─────────────┴─────────────────┴───────────────────┴──────────┘
 ```
-
-- `property_key_id` (u32): Big-endian `PropertyKeyId`
-- `value_term`: Sortable encoding of the property value (see below)
-- `node_id` (u64): Big-endian node identifier
 
 **SortableValue Encoding:**
 
@@ -633,74 +613,40 @@ Total: 6 bytes. Value is the name as raw UTF-8 bytes.
 └─────────┴─────────────┴────────────────────┘
 ```
 
-Variable length. Value is the `u32 (LE)` ID.
+Variable length. The name is the last field in the key, so its length is implicit from the key
+length; no `TerminatedBytes` encoding is needed. Value is the `u32 (LE)` ID.
 
 **Catalog Loading:**
 
 On startup, prefix scan `[0x01, 0x90]`, `[0x01, 0x92]`, and `[0x01, 0x94]` (the by-ID sub-types)
-to populate the in-memory bidirectional maps (name → ID and ID → name). The by-name records exist
-for potential future use (e.g., name uniqueness checks at the storage level) but are not read during
-normal loading. The catalog is expected to be small (thousands of entries at most), so full loading
-is practical.
+to populate the in-memory bidirectional maps (name → ID and ID → name). The catalog is expected
+to be small (thousands of entries at most), so full loading is practical.
+
+**Why keep the catalog?** Labels, edge types, and property keys are typically a small, stable set
+(dozens, not millions). Other graph engines like Neo4j and JanusGraph use integer IDs internally
+for the same reason. Adjacency keys include the edge type on every entry, so a 4-byte integer
+instead of a variable-length string adds up when you have billions of edges. This differs from
+the timeseries engine which decided against a dictionary, that trade-off makes sense there
+because metric label cardinality is higher and series fingerprinting provides an alternative
+compact identifier.
 
 **ID Assignment:**
 
 New catalog entries use incrementing IDs starting from 0. The next available ID for each catalog
 type is derived from the count of entries loaded from the by-ID scan. This assumes single-writer
-semantics: only one process writes to the catalog at a time. Concurrent writers loading the catalog
-independently could assign duplicate IDs. This is consistent with OpenData's current single-writer
-model per database instance.
+semantics: only one process writes to the catalog at a time. This is consistent with OpenData's
+current single-writer model per database instance.
 
 **Write Path:**
 
 When a new name is encountered (e.g., a new label "Person"), two records are written atomically:
 
 1. By-ID: `[0x01, 0x90, id_be]` → `"Person"` (UTF-8 bytes)
-2. By-Name: `[0x01, 0x91, terminated("Person")]` → `id_le` (4 bytes)
-
-### `ZoneMap` (`0xB0`)
-
-Stores per-property min/max values for skip pruning. The query engine calls
-`node_property_might_match(property, op, value)` before scanning, if the zone map proves no
-matches exist, the scan is skipped entirely.
-
-**Key Layout:**
-
-```text
-┌─────────┬─────────────┬─────────────────┐
-│ version │ record_tag  │ property_key_id │
-│ 1 byte  │   1 byte    │    4 bytes      │
-└─────────┴─────────────┴─────────────────┘
-```
-
-**Value Schema:**
-
-```text
-┌────────────────────────────────────────────────────────┐
-│                     ZoneMapValue                       │
-├────────────────────────────────────────────────────────┤
-│  value_type: u8  (type tag from Value enum)            │
-│  min:        Value::serialize() bytes                  │
-│  max:        Value::serialize() bytes                  │
-│  count:      u64 (LE), number of non-null values       │
-└────────────────────────────────────────────────────────┘
-```
-
-**Merge Operator:**
-
-Zone maps use SlateDB merge operators for atomic updates. When a property is set, a merge
-operation extends the min/max range if the new value falls outside it and increments the count.
-The merge function:
-
-1. For each operand, decode `(value_type, min, max, count)`
-2. Output: `min = min(all mins)`, `max = max(all maxes)`, `count = sum(all counts)`
-
-This avoids read-modify-write on every property mutation.
+2. By-Name: `[0x01, 0x91, "Person"]` → `id_le` (4 bytes)
 
 ### `Metadata` (`0xE0`)
 
-Stores global counters and the current MVCC epoch. These are singleton records with fixed
-well-known keys.
+Stores global counters. These are singleton records with fixed well-known keys.
 
 **Key Layout:**
 
@@ -717,66 +663,12 @@ well-known keys.
 |--------|----------------|------------|-----------------------------------|
 | `0x00` | `NodeCount`    | u64 (LE)   | Total live (non-deleted) nodes    |
 | `0x01` | `EdgeCount`    | u64 (LE)   | Total live (non-deleted) edges    |
-| `0x02` | `CurrentEpoch` | u64 (LE)   | Current global MVCC epoch         |
 
 **Merge Operator:**
 
 `NodeCount` and `EdgeCount` use merge operators for atomic increment/decrement. Each mutation
 (create or delete) issues a merge with a signed delta (`+1` or `-1`). The merge function sums
 all deltas.
-
-`CurrentEpoch` is updated via a simple `put` (not merge) when the epoch advances.
-
-### `Statistics` (`0xE1`)
-
-Stores pre-computed statistics for the cost-based optimizer. Updated periodically (not on every
-mutation).
-
-**Key Layout:**
-
-```text
-┌─────────┬─────────────┐
-│ version │ record_tag  │
-│ 1 byte  │   1 byte    │
-└─────────┴─────────────┘
-```
-
-**Value Schema:**
-
-```text
-┌──────────────────────────────────────────┐
-│             StatisticsValue              │
-├──────────────────────────────────────────┤
-│  version:          u32 (LE)              │
-│  total_nodes:      u64 (LE)              │
-│  total_edges:      u64 (LE)              │
-│  label_stats:      Array<LabelStat>      │
-│  edge_type_stats:  Array<EdgeTypeStat>   │
-│                                          │
-│  LabelStat                               │
-│  ┌────────────────────────────────────┐  │
-│  │  label_id:   u32 (LE)              │  │
-│  │  count:      u64 (LE)              │  │
-│  └────────────────────────────────────┘  │
-│                                          │
-│  EdgeTypeStat                            │
-│  ┌────────────────────────────────────┐  │
-│  │  edge_type_id:  u32 (LE)           │  │
-│  │  count:         u64 (LE)           │  │
-│  │  avg_out_deg:   f64 (LE)           │  │
-│  │  avg_in_deg:    f64 (LE)           │  │
-│  └────────────────────────────────────┘  │
-└──────────────────────────────────────────┘
-```
-
-Statistics are recomputed periodically (e.g., every N commits) and persisted as a single record.
-On startup, the statistics record is loaded and exposed via `GraphStore::statistics()`.
-
-**Design assumption:** The statistics record stores all label and edge type statistics in a single
-blob. This assumes a small to moderate schema (hundreds of labels and edge types, not millions).
-Each refresh rewrites the entire record. If schema cardinality grows large, a future optimization
-could split statistics into per-label and per-edge-type records (using the catalog ID as a key
-suffix) to allow incremental updates.
 
 ### `SeqBlock` (`0xF0`)
 
@@ -818,63 +710,51 @@ Property values (`NodeProperty` / `EdgeProperty` values) are serialized using Gr
 entirely to `grafeo-common`, ensuring that the storage layer is always compatible with the query
 engine's type system without maintaining a separate encoding.
 
-The `Value` enum supports all types listed in the Core Types section above (Null, Bool, Int64,
-Float64, String, Bytes, Timestamp, Date, Time, Duration, ZonedDatetime, List, Map, Vector, Path).
-See Grafeo's `grafeo-common` crate documentation for the exact binary format.
-
-**Note:** The `SortableValue` encoding used in `PropertyIndex` keys (see PropertyIndex section) is
-a separate, sort-preserving encoding distinct from `Value::serialize()`. Only Bool, Int64, Float64,
+The `SortableValue` encoding used in `PropertyIndex` keys (see PropertyIndex section) is a
+separate, sort-preserving encoding distinct from `Value::serialize()`. Only Bool, Int64, Float64,
 and String values support sortable encoding; other types return `None` and are not indexed.
 
-### MVCC Model
+### Concurrency Model
 
-The graph database uses epoch-based MVCC for snapshot isolation. Each write operation (create
-node, delete edge, etc.) is associated with an epoch. Readers observe a consistent snapshot at
-a specific epoch.
+Concurrency control is delegated to SlateDB's built-in transaction support rather than implementing
+a custom MVCC layer. This simplifies the storage design and leverages SlateDB's tested isolation
+guarantees.
 
-**Epoch Lifecycle:**
+**Transaction Usage:**
 
-1. The global epoch starts at 1 and is stored in `Metadata(Epoch)`.
-2. Each write transaction advances the epoch by 1 on commit.
-3. Readers capture the current epoch at transaction start and use it for all reads.
-4. Entity records (`NodeRecord`, `EdgeRecord`) include the epoch in their key.
-5. Property records (`NodeProperty`, `EdgeProperty`) do **not** include the epoch, they use
-   last-write-wins semantics. A property reflects the state after the most recent mutation.
+The adapter uses two patterns depending on the operation type:
 
-**Visibility Rule:**
+1. **Write-only operations** (`create_node`, `create_edge`, `set_*_property`): Use `WriteBatch`
+   via `Storage::apply()`. All records for a single logical operation (entity record, indexes,
+   counter merges) are written atomically in one batch.
 
-A node version at epoch E_v is visible to a reader at epoch E_r if:
+2. **Read-then-write operations** (`delete_node`, `delete_edge`, `add_label`, `remove_label`,
+   `remove_*_property`): Use `StorageTransaction` for snapshot-isolated atomicity. The operation
+   begins a transaction, reads the current state within that transaction's snapshot, buffers
+   writes, and commits. This prevents TOCTOU races (e.g., reading a node's labels, then writing
+   updated labels, while another writer modifies the same node).
 
-- E_v ≤ E_r (the version was committed before or at the reader's snapshot)
-- No deletion marker exists at any epoch E_d where E_v < E_d ≤ E_r
+**Conflict Handling:**
 
-For point lookups, this means scanning the version chain (ordered by epoch descending) and
-returning the first non-deleted version with epoch ≤ E_r.
+SlateDB transactions use snapshot isolation. If two concurrent transactions write to the same key,
+the second to commit receives a `TransactionConflict` error. The adapter retries conflicting
+operations up to 3 times with a fresh transaction on each attempt.
 
-**Properties and MVCC:**
+**Why not custom MVCC?**
 
-Properties intentionally do not participate in MVCC versioning. This is a deliberate simplification
-for the initial implementation:
+An earlier draft of this RFC included epoch-based MVCC with version chains in entity record keys.
+This was rejected for several reasons:
 
-- **Benefit**: Simpler storage (no version chains for properties), fewer keys, faster property
-  access.
-- **Tradeoff**: A reader at epoch E may see property values written after E. This is a **known
-  correctness gap**, not merely a performance tradeoff. For example: a reader at epoch 5 could
-  observe a property value written at epoch 6, causing `WHERE n.status = 'active'` to return
-  incorrect results if the value was changed between epochs. Queries that depend on historical
-  property consistency should not rely on epoch-based snapshots for property reads.
-- **Mitigation**: In practice, most graph query workloads read the latest property values (e.g.,
-  recommendation engines, dependency mapping). Analytical queries over historical property state
-  are uncommon.
-- **Future**: Full property MVCC can be added by including the epoch in property keys, following
-  the same pattern as entity records. The current key layout is forward-compatible with this
-  extension.
-
-**Garbage Collection:**
-
-Old versions accumulate in the LSM tree. A background garbage collector (details in a future RFC)
-periodically removes versions older than the oldest active reader's epoch. Until GC runs,
-old versions are harmless, they consume space but don't affect correctness.
+- **Redundant**: SlateDB already provides snapshot isolation via `DbTransaction`, making a
+  custom MVCC layer unnecessary.
+- **Race condition**: The epoch-based design required reading and incrementing a global epoch
+  counter, which was not protected by a transaction. Two concurrent writers could read the same
+  epoch and stamp their records with duplicate epoch values.
+- **Complexity**: Version chains required scanning and filtering for every point lookup (O(v)
+  where v is the number of versions), garbage collection of old versions, and special handling
+  of deletion markers. Without these, point lookups are O(1) direct `get()` calls.
+- **Forward-compatible**: If time-travel queries are needed in the future, the key layout can
+  be extended with an epoch suffix without changing the record tag allocation.
 
 ### Write Path
 
@@ -886,16 +766,14 @@ create_node_with_props(["Person", "Employee"], [("name", "Alice"), ("age", 30)])
 1. Allocate node_id from SequenceAllocator
 2. Resolve/create label IDs: "Person" → LabelId(0), "Employee" → LabelId(1)
 3. Resolve/create property key IDs: "name" → PropKeyId(0), "age" → PropKeyId(1)
-4. Current epoch = E
 
-WriteBatch:
-  PUT [0x01, 0x10, node_id, E]           → NodeRecordValue { flags: 0, labels: [0, 1] }
+WriteBatch (via Storage::apply):
+  PUT [0x01, 0x10, node_id]              → NodeRecordValue { labels: [0, 1] }
   PUT [0x01, 0x30, node_id, PropKeyId(0)] → Value::serialize(String("Alice"))
   PUT [0x01, 0x30, node_id, PropKeyId(1)] → Value::serialize(Int64(30))
   PUT [0x01, 0x70, LabelId(0), node_id]  → (empty)
   PUT [0x01, 0x70, LabelId(1), node_id]  → (empty)
   MERGE [0x01, 0xE0, 0x00]               → +1  (NodeCount)
-  MERGE [0x01, 0xB0, PropKeyId(1)]       → ZoneMap extend(30)
 ```
 
 Creating an edge:
@@ -905,13 +783,28 @@ create_edge(src=NodeId(1), dst=NodeId(2), "KNOWS"):
 
 1. Allocate edge_id from SequenceAllocator
 2. Resolve/create edge type: "KNOWS" → EdgeTypeId(0)
-3. Current epoch = E
 
-WriteBatch:
-  PUT [0x01, 0x20, edge_id, E]                                → EdgeRecordValue { src: 1, dst: 2, type: 0 }
+WriteBatch (via Storage::apply):
+  PUT [0x01, 0x20, edge_id]                                → EdgeRecordValue { src: 1, dst: 2, type: 0 }
   PUT [0x01, 0x50, NodeId(1), EdgeTypeId(0), NodeId(2), edge_id] → (empty)
   PUT [0x01, 0x60, NodeId(2), EdgeTypeId(0), NodeId(1), edge_id] → (empty)
-  MERGE [0x01, 0xE0, 0x01]                                    → +1  (EdgeCount)
+  MERGE [0x01, 0xE0, 0x01]                                 → +1  (EdgeCount)
+```
+
+Deleting a node (transactional):
+
+```text
+delete_node(NodeId(42)):
+
+StorageTransaction:
+  BEGIN
+  GET  [0x01, 0x10, 42]  → NodeRecordValue { labels: [0, 1] }  (if absent → return false)
+  DEL  [0x01, 0x10, 42]
+  SCAN [0x01, 0x30, 42, ...]  → delete all NodeProperty records
+  DEL  [0x01, 0x70, LabelId(0), 42]
+  DEL  [0x01, 0x70, LabelId(1), 42]
+  MERGE [0x01, 0xE0, 0x00]  → -1  (NodeCount)
+  COMMIT
 ```
 
 ### Read Path: Assembling a Full Node
@@ -919,22 +812,19 @@ WriteBatch:
 Grafeo's `get_node(id)` returns `Node { id, labels, properties }`. Assembling this from SlateDB:
 
 ```text
-get_node(NodeId(42)) at epoch E:
+get_node(NodeId(42)):
 
-1. Seek [0x01, 0x10, 42_be, 0x00..0x00]
-2. Scan versions → find latest with epoch ≤ E, not DELETED
-3. Decode NodeRecordValue → label_ids = [0, 1]
-4. Resolve labels via catalog: LabelId(0) → "Person", LabelId(1) → "Employee"
-5. Prefix scan [0x01, 0x30, 42_be] → all properties for node 42
-6. Decode each Value (via Value::deserialize), resolve property key names via catalog
-7. Return Node { id: 42, labels: ["Person", "Employee"], properties: { "name": "Alice", "age": 30 } }
+1. GET [0x01, 0x10, 42_be]  → NodeRecordValue { label_ids: [0, 1] }
+2. Resolve labels via catalog: LabelId(0) → "Person", LabelId(1) → "Employee"
+3. Prefix scan [0x01, 0x30, 42_be] → all properties for node 42
+4. Decode each Value (via Value::deserialize), resolve property key names via catalog
+5. Return Node { id: 42, labels: ["Person", "Employee"], properties: { "name": "Alice", "age": 30 } }
 ```
 
 The mapping from trait methods to SlateDB operations is straightforward: each trait method maps
-to the record type described above (e.g., `get_node` seeks a `NodeRecord` + prefix scans
-`NodeProperty`; `edges_from` prefix scans `ForwardAdj`/`BackwardAdj`; `nodes_by_label` prefix
-scans `LabelIndex`). The write path examples above show the full record sets for create
-operations. `node_ids()` is the only expensive operation (full `NodeRecord` scan, O(N)); the
+to the record type described above (e.g., `get_node` is a direct `get` on `NodeRecord`;
+`edges_from` prefix scans `ForwardAdj`/`BackwardAdj`; `nodes_by_label` prefix scans
+`LabelIndex`). `node_ids()` is the only expensive operation (full `NodeRecord` scan, O(N)); the
 query engine avoids it when label or property predicates are available.
 
 ## Alternatives
@@ -950,14 +840,12 @@ Value: Map { "name": "Alice", "age": 30, "email": "alice@example.com" }
 
 **Rejected because:**
 
-1. **Read amplification**, Reading one property requires deserializing the entire map.
+1. **Read amplification** — Reading one property requires deserializing the entire map.
    `get_node_property(id, "name")` must load and decode all properties.
-2. **Write amplification**, Setting one property requires read-modify-write of the entire map.
+2. **Write amplification** — Setting one property requires read-modify-write of the entire map.
    For nodes with many properties or large values, this is expensive.
-3. **Projection pushdown**, Grafeo's selective batch methods (`get_nodes_properties_selective_batch`)
+3. **Projection pushdown** — Grafeo's selective batch methods (`get_nodes_properties_selective_batch`)
    become less effective when the smallest unit of storage is the full property map.
-
-The per-property approach trades key count for read/write efficiency on individual properties.
 
 ### Adjacency Lists as Serialized Arrays
 
@@ -978,23 +866,6 @@ Value: [(edge_type_id, dst_node_id, edge_id), ...]
 3. **Concurrent writes**: Multiple concurrent edge creations on the same node conflict on the
    same key. Individual keys allow concurrent writes without conflicts.
 
-### Epoch in Property Keys (Full Property MVCC)
-
-An alternative includes the epoch in property keys for full MVCC:
-
-```text
-Key: [0x01, 0x30, node_id, property_key_id, epoch]
-```
-
-**Deferred because:**
-
-1. **Complexity**: Version chains for properties multiply storage requirements and complicate
-   garbage collection.
-2. **Marginal benefit**: Most graph queries read the latest property values. Historical property
-   queries are rare.
-3. **Future-compatible**: The current design can be upgraded to full property MVCC by adding the
-   epoch suffix, without changing the record tag allocation.
-
 ### Bitmap-Based Label Index
 
 An alternative uses RoaringBitmaps per label (similar to the vector database's metadata index):
@@ -1013,6 +884,26 @@ Value: RoaringTreemap of node IDs
 3. **Can be added later**: A bitmap-based index can coexist with the per-key index as a
    compaction-time optimization.
 
+### Custom MVCC with Epoch-Based Versioning
+
+An earlier draft stored an epoch in entity record keys and used `DELETED` flags for soft-delete:
+
+```text
+Key: [0x01, 0x10, node_id, epoch]  (18 bytes)
+Value: { flags: DELETED, label_ids: [] }
+```
+
+**Rejected because:**
+
+1. **Redundant with SlateDB transactions**: SlateDB provides snapshot isolation natively via
+   `DbTransaction`. Building a second MVCC layer on top adds complexity without new capability.
+2. **Race condition**: The epoch counter (read-increment-write) was not protected by a transaction,
+   allowing two concurrent writers to use the same epoch.
+3. **Read amplification**: Every point lookup required a prefix scan over the version chain and
+   filtering by epoch, instead of a single O(1) `get()`.
+4. **Garbage collection burden**: Old versions accumulated in the LSM tree and required a
+   background GC process (not yet designed) to reclaim space.
+
 ## Open Questions
 
 1. **Property index scope**: Should property indexes also cover edge properties, or only node
@@ -1029,10 +920,10 @@ Value: RoaringTreemap of node IDs
 4. ~~**Write batching granularity**~~: **Resolved.** Each mutation method (e.g.,
    `create_node_with_props`, `create_edge`) issues a single atomic `WriteBatch` containing the
    entity record, all associated index entries (label, adjacency, property index), and counter
-   merge operations. This ensures that a node and its indexes are always consistent: there is no
-   window where a node exists but its label index entry does not, or vice versa. This matches the
-   pattern used by the vector and timeseries engines, where a single `storage.apply(ops)` call
-   persists all records for one logical operation atomically.
+   merge operations. This ensures that a node and its indexes are always consistent.
+
+5. ~~**MVCC model**~~: **Resolved.** Concurrency control is delegated to SlateDB's transaction
+   support. No custom epoch-based MVCC. See the "Concurrency Model" section.
 
 ## Future Considerations
 
@@ -1043,10 +934,11 @@ Future RFCs will address:
 - **Graph algorithms**: Integrating Grafeo's `algos` feature (PageRank, shortest path,
   community detection, etc.) as server-side procedures.
 - **Change data capture**: Exposing graph mutations as a stream for downstream consumers.
-- **Compaction and GC**: Policies for removing old MVCC versions and cleaning up tombstoned
-  adjacency/index entries.
+- **Compaction policies**: Policies for cleaning up tombstoned adjacency/index entries.
 - **Write coordination**: Integration with the cross-project write coordination RFC for
   multi-writer scenarios.
+- **Time-travel queries**: If needed, the key layout can be extended with an epoch suffix to
+  enable versioned reads. The current design is forward-compatible with this extension.
 
 ## References
 
@@ -1067,8 +959,13 @@ Future RFCs will address:
 
 ## Updates
 
-| Date       | Description                                                         |
-|------------|---------------------------------------------------------------------|
-| 2026-03-05 | Initial draft                                                       |
-| 2026-03-08 | Aligned with test implementation: catalog 6 sub-types, metadata keys,    |
-|            | EdgeRecordValue field order, SeqBlock reserved bits, Grafeo v0.5.18 |
+| Date       | Description                                                                       |
+|------------|-----------------------------------------------------------------------------------|
+| 2026-03-05 | Initial draft                                                                     |
+| 2026-03-08 | Aligned with test implementation: catalog 6 sub-types, metadata keys,             |
+|            | EdgeRecordValue field order, SeqBlock reserved bits, Grafeo v0.5.18               |
+| 2026-03-14 | Major revision: removed custom MVCC epoch layer, delegated concurrency control    |
+|            | to SlateDB transactions. Simplified NodeRecord/EdgeRecord keys (18 to 10 bytes),  |
+|            | removed DELETED flags, removed CurrentEpoch metadata. Added StorageTransaction    |
+|            | trait to common crate. Read-then-write ops use transactions for atomicity.        |
+|            | Updated to Grafeo v0.5.22. Addressed reviewer feedback from cadonna and apurvam.  |
