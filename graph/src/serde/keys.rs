@@ -56,34 +56,27 @@ fn prefix_range(record_type: RecordType, f: impl FnOnce(&mut BytesMut)) -> Bytes
 }
 
 // ---------------------------------------------------------------------------
-// NodeRecordKey: [ver][0x10][node_id:u64 BE][epoch:u64 BE] = 18 bytes
+// NodeRecordKey: [ver][0x10][node_id:u64 BE] = 10 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeRecordKey {
     pub node_id: u64,
-    pub epoch: u64,
 }
 
 impl NodeRecordKey {
-    const SIZE: usize = 18;
+    const SIZE: usize = 10;
 
     pub fn encode(&self) -> Bytes {
         encode_key(RecordType::NodeRecord, 0, Self::SIZE, |buf| {
             buf.put_u64(self.node_id);
-            buf.put_u64(self.epoch);
         })
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         decode_prefix(data, Self::SIZE, RecordType::NodeRecord, "NodeRecord")?;
         let node_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
-        let epoch = u64::from_be_bytes(data[10..18].try_into().unwrap());
-        Ok(Self { node_id, epoch })
-    }
-
-    pub fn node_prefix(node_id: u64) -> BytesRange {
-        prefix_range(RecordType::NodeRecord, |buf| buf.put_u64(node_id))
+        Ok(Self { node_id })
     }
 
     pub fn all_nodes_range() -> BytesRange {
@@ -92,34 +85,28 @@ impl NodeRecordKey {
 }
 
 // ---------------------------------------------------------------------------
-// EdgeRecordKey: [ver][0x20][edge_id:u64 BE][epoch:u64 BE] = 18 bytes
+// EdgeRecordKey: [ver][0x20][edge_id:u64 BE] = 10 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeRecordKey {
     pub edge_id: u64,
-    pub epoch: u64,
 }
 
 impl EdgeRecordKey {
-    const SIZE: usize = 18;
+    const SIZE: usize = 10;
 
     pub fn encode(&self) -> Bytes {
         encode_key(RecordType::EdgeRecord, 0, Self::SIZE, |buf| {
             buf.put_u64(self.edge_id);
-            buf.put_u64(self.epoch);
         })
     }
 
+    #[cfg(test)]
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         decode_prefix(data, Self::SIZE, RecordType::EdgeRecord, "EdgeRecord")?;
         let edge_id = u64::from_be_bytes(data[2..10].try_into().unwrap());
-        let epoch = u64::from_be_bytes(data[10..18].try_into().unwrap());
-        Ok(Self { edge_id, epoch })
-    }
-
-    pub fn edge_prefix(edge_id: u64) -> BytesRange {
-        prefix_range(RecordType::EdgeRecord, |buf| buf.put_u64(edge_id))
+        Ok(Self { edge_id })
     }
 }
 
@@ -529,10 +516,7 @@ mod tests {
 
     #[test]
     fn should_roundtrip_node_record_key() {
-        let key = NodeRecordKey {
-            node_id: 42,
-            epoch: 7,
-        };
+        let key = NodeRecordKey { node_id: 42 };
         let encoded = key.encode();
         assert_eq!(NodeRecordKey::decode(&encoded).unwrap(), key);
         assert_eq!(encoded.len(), NodeRecordKey::SIZE);
@@ -540,10 +524,7 @@ mod tests {
 
     #[test]
     fn should_roundtrip_edge_record_key() {
-        let key = EdgeRecordKey {
-            edge_id: 100,
-            epoch: 3,
-        };
+        let key = EdgeRecordKey { edge_id: 100 };
         let encoded = key.encode();
         assert_eq!(EdgeRecordKey::decode(&encoded).unwrap(), key);
         assert_eq!(encoded.len(), EdgeRecordKey::SIZE);
@@ -642,24 +623,10 @@ mod tests {
     // --- Ordering tests ---
 
     #[test]
-    fn should_order_node_records_by_id_then_epoch() {
-        let k1 = NodeRecordKey {
-            node_id: 1,
-            epoch: 5,
-        }
-        .encode();
-        let k2 = NodeRecordKey {
-            node_id: 1,
-            epoch: 10,
-        }
-        .encode();
-        let k3 = NodeRecordKey {
-            node_id: 2,
-            epoch: 1,
-        }
-        .encode();
-        assert!(k1 < k2, "same node, earlier epoch should sort first");
-        assert!(k2 < k3, "smaller node_id should sort before larger");
+    fn should_order_node_records_by_id() {
+        let k1 = NodeRecordKey { node_id: 1 }.encode();
+        let k2 = NodeRecordKey { node_id: 2 }.encode();
+        assert!(k1 < k2, "smaller node_id should sort before larger");
     }
 
     #[test]
@@ -730,16 +697,8 @@ mod tests {
 
     #[test]
     fn should_separate_record_types_lexicographically() {
-        let node = NodeRecordKey {
-            node_id: 0,
-            epoch: 0,
-        }
-        .encode();
-        let edge = EdgeRecordKey {
-            edge_id: 0,
-            epoch: 0,
-        }
-        .encode();
+        let node = NodeRecordKey { node_id: 0 }.encode();
+        let edge = EdgeRecordKey { edge_id: 0 }.encode();
         let nprop = NodePropertyKey {
             node_id: 0,
             prop_key_id: 0,
@@ -784,38 +743,6 @@ mod tests {
     }
 
     // --- Prefix containment tests ---
-
-    #[test]
-    fn should_node_prefix_contain_all_epochs() {
-        let range = NodeRecordKey::node_prefix(42);
-        assert!(
-            range.contains(
-                &NodeRecordKey {
-                    node_id: 42,
-                    epoch: 0
-                }
-                .encode()
-            )
-        );
-        assert!(
-            range.contains(
-                &NodeRecordKey {
-                    node_id: 42,
-                    epoch: u64::MAX
-                }
-                .encode()
-            )
-        );
-        assert!(
-            !range.contains(
-                &NodeRecordKey {
-                    node_id: 43,
-                    epoch: 0
-                }
-                .encode()
-            )
-        );
-    }
 
     #[test]
     fn should_forward_adj_src_prefix_contain_all_types_and_dsts() {

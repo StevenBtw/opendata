@@ -780,78 +780,55 @@ async fn multi_edge_neighbors_dedup() {
     );
 }
 
-// ─── 3.2 MVCC epoch visibility ──────────────────────────────────────
-// RFC: get_node_versioned(id, epoch, tx) should return the node version
-// visible at the given epoch. A node deleted at epoch E2 should still
-// be visible at epoch E1 < E2.
+// ─── 3.2 Versioned methods delegate to current state ─────────────────
+// Concurrency control is delegated to SlateDB transactions. The versioned
+// methods simply delegate to their non-versioned counterparts.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mvcc_versioned_read_sees_earlier_epoch() {
+async fn versioned_read_delegates_to_current() {
     let db = setup().await;
     let s = store(&db);
 
-    // Create node at epoch 1
-    let id = s.create_node_versioned(&["Person"], EpochId(1), TxId(0));
-    assert!(
-        s.get_node_versioned(id, EpochId(1), TxId(0)).is_some(),
-        "node should be visible at creation epoch"
+    let id = s.create_node(&["Person"]);
+
+    // Versioned read should return the same result regardless of epoch/tx
+    assert_eq!(
+        s.get_node_versioned(id, EpochId(0), TxId(0))
+            .map(|n| n.id),
+        s.get_node(id).map(|n| n.id),
+        "versioned read should delegate to current state"
     );
 
-    // Delete at epoch 2
-    s.delete_node_versioned(id, EpochId(2), TxId(0));
+    // After deletion, versioned read should also return None
+    s.delete_node(id);
+    assert!(s.get_node_versioned(id, EpochId(0), TxId(0)).is_none());
+}
 
-    // At epoch 1, the node should still be visible (pre-deletion)
-    assert!(
-        s.get_node_versioned(id, EpochId(1), TxId(0)).is_some(),
-        "node should be visible at epoch before deletion"
-    );
+#[tokio::test(flavor = "multi_thread")]
+async fn current_epoch_returns_zero() {
+    let db = setup().await;
+    let s = store(&db);
 
-    // At epoch 2, the node should be gone
-    assert!(
-        s.get_node_versioned(id, EpochId(2), TxId(0)).is_none(),
-        "node should not be visible at deletion epoch"
+    // No custom MVCC — epoch is always 0
+    assert_eq!(
+        s.current_epoch(),
+        EpochId(0),
+        "current_epoch should return 0 (no custom MVCC)"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mvcc_versioned_read_future_epoch_not_visible() {
+async fn versioned_edge_delegates_to_current() {
     let db = setup().await;
     let s = store(&db);
 
-    // Create node at epoch 5
-    let id = s.create_node_versioned(&["Thing"], EpochId(5), TxId(0));
-
-    // At epoch 3, the node should NOT be visible (created in the future)
-    assert!(
-        s.get_node_versioned(id, EpochId(3), TxId(0)).is_none(),
-        "node created at epoch 5 should not be visible at epoch 3"
-    );
-
-    // At epoch 5, it should be visible
-    assert!(
-        s.get_node_versioned(id, EpochId(5), TxId(0)).is_some(),
-        "node should be visible at its creation epoch"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn mvcc_edge_versioned_read() {
-    let db = setup().await;
-    let s = store(&db);
-
-    let a = s.create_node_versioned(&[], EpochId(1), TxId(0));
-    let b = s.create_node_versioned(&[], EpochId(1), TxId(0));
-    let eid = s.create_edge_versioned(a, b, "KNOWS", EpochId(2), TxId(0));
-
-    // Edge created at epoch 2 should not be visible at epoch 1
-    assert!(
-        s.get_edge_versioned(eid, EpochId(1), TxId(0)).is_none(),
-        "edge should not be visible before creation epoch"
-    );
+    let a = s.create_node(&[]);
+    let b = s.create_node(&[]);
+    let eid = s.create_edge(a, b, "KNOWS");
 
     assert!(
-        s.get_edge_versioned(eid, EpochId(2), TxId(0)).is_some(),
-        "edge should be visible at creation epoch"
+        s.get_edge_versioned(eid, EpochId(0), TxId(0)).is_some(),
+        "versioned edge read should find the edge"
     );
 }
 

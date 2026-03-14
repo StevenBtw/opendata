@@ -72,7 +72,6 @@ impl TryFrom<u8> for CatalogKind {
 pub(crate) enum MetadataSubType {
     NodeCount = 0,
     EdgeCount = 1,
-    CurrentEpoch = 2,
 }
 
 impl TryFrom<u8> for MetadataSubType {
@@ -81,7 +80,6 @@ impl TryFrom<u8> for MetadataSubType {
         match v {
             0 => Ok(Self::NodeCount),
             1 => Ok(Self::EdgeCount),
-            2 => Ok(Self::CurrentEpoch),
             other => Err(common::serde::DeserializeError {
                 message: format!("unknown metadata sub-type: {other}"),
             }),

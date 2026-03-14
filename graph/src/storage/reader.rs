@@ -17,84 +17,28 @@ use crate::serde::values::{self, EdgeRecordValue, NodeRecordValue};
 
 impl GraphStore for SlateGraphStore {
     fn get_node(&self, id: NodeId) -> Option<Node> {
-        self.exec(async {
-            let records = self.storage.scan(NodeRecordKey::node_prefix(id.0)).await?;
-            Ok(records)
-        })
-        .ok()
-        .and_then(|records| {
-            // Take last record (latest epoch) for this node
-            let record = records.last()?;
-            let val = NodeRecordValue::decode(&record.value).ok()?;
-            if val.is_deleted() {
-                return None;
-            }
-            self.build_node(id).ok().flatten()
-        })
+        let key = NodeRecordKey { node_id: id.0 }.encode();
+        self.exec(async { self.storage.get(key).await })
+            .ok()?
+            .as_ref()?;
+        self.build_node(id).ok().flatten()
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        self.exec(async {
-            let records = self.storage.scan(EdgeRecordKey::edge_prefix(id.0)).await?;
-            Ok(records)
-        })
-        .ok()
-        .and_then(|records| {
-            let record = records.last()?;
-            let val = EdgeRecordValue::decode(&record.value).ok()?;
-            if val.is_deleted() {
-                return None;
-            }
-            self.build_edge(id, &val).ok()
-        })
+        let key = EdgeRecordKey { edge_id: id.0 }.encode();
+        let record = self
+            .exec(async { self.storage.get(key).await })
+            .ok()??;
+        let val = EdgeRecordValue::decode(&record.value).ok()?;
+        self.build_edge(id, &val).ok()
     }
 
-    fn get_node_versioned(&self, id: NodeId, epoch: EpochId, _tx_id: TxId) -> Option<Node> {
-        self.exec(async {
-            let records = self.storage.scan(NodeRecordKey::node_prefix(id.0)).await?;
-            Ok(records)
-        })
-        .ok()
-        .and_then(|records| {
-            // Find the latest version with epoch <= requested epoch.
-            // Records are sorted by epoch ascending (BE encoding).
-            let visible = records
-                .iter()
-                .filter(|r| {
-                    NodeRecordKey::decode(&r.key)
-                        .map(|k| k.epoch <= epoch.0)
-                        .unwrap_or(false)
-                })
-                .last()?;
-            let val = NodeRecordValue::decode(&visible.value).ok()?;
-            if val.is_deleted() {
-                return None;
-            }
-            self.build_node(id).ok().flatten()
-        })
+    fn get_node_versioned(&self, id: NodeId, _epoch: EpochId, _tx_id: TxId) -> Option<Node> {
+        self.get_node(id)
     }
 
-    fn get_edge_versioned(&self, id: EdgeId, epoch: EpochId, _tx_id: TxId) -> Option<Edge> {
-        self.exec(async {
-            let records = self.storage.scan(EdgeRecordKey::edge_prefix(id.0)).await?;
-            Ok(records)
-        })
-        .ok()
-        .and_then(|records| {
-            let visible = records
-                .iter()
-                .filter(|r| {
-                    EdgeRecordKey::decode(&r.key)
-                        .map(|k| k.epoch <= epoch.0)
-                        .unwrap_or(false)
-                })
-                .last()?;
-            let val = EdgeRecordValue::decode(&visible.value).ok()?;
-            if val.is_deleted() {
-                return None;
-            }
-            self.build_edge(id, &val).ok()
-        })
+    fn get_edge_versioned(&self, id: EdgeId, _epoch: EpochId, _tx_id: TxId) -> Option<Edge> {
+        self.get_edge(id)
     }
 
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
@@ -253,35 +197,11 @@ impl GraphStore for SlateGraphStore {
             return Vec::new();
         };
 
-        // Collect unique node IDs (skip deleted), taking the latest epoch per node
-        let mut result = Vec::new();
-        let mut last_node_id: Option<u64> = None;
-
-        for record in &records {
-            if let Ok(key) = NodeRecordKey::decode(&record.key) {
-                // Deduplicate: only process each node_id once (take last = latest epoch)
-                if last_node_id == Some(key.node_id) {
-                    // Replace previous -- this version is later (higher epoch)
-                    if let Ok(val) = NodeRecordValue::decode(&record.value) {
-                        if val.is_deleted() {
-                            result.pop();
-                        } else if result.last() != Some(&NodeId(key.node_id)) {
-                            // Previous was deleted, this one isn't
-                            result.push(NodeId(key.node_id));
-                        }
-                    }
-                } else if let Ok(val) = NodeRecordValue::decode(&record.value) {
-                    if !val.is_deleted() {
-                        result.push(NodeId(key.node_id));
-                    }
-                    last_node_id = Some(key.node_id);
-                } else {
-                    last_node_id = Some(key.node_id);
-                }
-            }
-        }
-
-        result
+        records
+            .iter()
+            .filter_map(|r| NodeRecordKey::decode(&r.key).ok())
+            .map(|k| NodeId(k.node_id))
+            .collect()
     }
 
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
@@ -317,20 +237,13 @@ impl GraphStore for SlateGraphStore {
     }
 
     fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
-        self.exec(async {
-            let records = self.storage.scan(EdgeRecordKey::edge_prefix(id.0)).await?;
-            Ok(records)
-        })
-        .ok()
-        .and_then(|records| {
-            let record = records.last()?;
-            let val = EdgeRecordValue::decode(&record.value).ok()?;
-            if val.is_deleted() {
-                return None;
-            }
-            let catalog = self.catalog.read();
-            catalog.get_edge_type_name(val.type_id).cloned()
-        })
+        let key = EdgeRecordKey { edge_id: id.0 }.encode();
+        let record = self
+            .exec(async { self.storage.get(key).await })
+            .ok()??;
+        let val = EdgeRecordValue::decode(&record.value).ok()?;
+        let catalog = self.catalog.read();
+        catalog.get_edge_type_name(val.type_id).cloned()
     }
 
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
@@ -355,7 +268,6 @@ impl GraphStore for SlateGraphStore {
         if conditions.is_empty() {
             return Vec::new();
         }
-        // Start with first condition, then intersect
         let mut result = self.find_nodes_by_property(conditions[0].0, &conditions[0].1);
         for (prop, val) in &conditions[1..] {
             let candidates: std::collections::HashSet<NodeId> =
@@ -401,7 +313,6 @@ impl GraphStore for SlateGraphStore {
         _op: CompareOp,
         _value: &Value,
     ) -> bool {
-        // No zone maps yet -- always return true (no false negatives)
         true
     }
 
@@ -432,7 +343,7 @@ impl GraphStore for SlateGraphStore {
     }
 
     fn current_epoch(&self) -> EpochId {
-        EpochId(self.current_epoch.load(Ordering::Relaxed))
+        EpochId(0)
     }
 }
 
@@ -530,21 +441,13 @@ impl SlateGraphStore {
             .collect()
     }
 
-    /// Loads labels for a node from the inline label IDs in the NodeRecord.
+    /// Loads labels for a node from the NodeRecord value.
     fn load_node_labels(&self, node_id: u64) -> crate::Result<Vec<ArcStr>> {
-        let records = self.exec(async {
-            self.storage
-                .scan(NodeRecordKey::node_prefix(node_id))
-                .await
-        })?;
-
-        let Some(record) = records.last() else {
+        let key = NodeRecordKey { node_id }.encode();
+        let Some(record) = self.exec(async { self.storage.get(key).await })? else {
             return Ok(Vec::new());
         };
         let val = NodeRecordValue::decode(&record.value)?;
-        if val.is_deleted() {
-            return Ok(Vec::new());
-        }
 
         let catalog = self.catalog.read();
         let labels = val

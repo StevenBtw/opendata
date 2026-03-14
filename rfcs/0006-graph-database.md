@@ -1,4 +1,4 @@
-# RFC 0001: Graph Database Storage
+# RFC 0006: Graph Database Storage
 
 **Status**: Draft
 
@@ -10,7 +10,7 @@
 
 This RFC defines the storage model for a labeled property graph (LPG) database built on
 [SlateDB](https://github.com/slatedb/slatedb). The graph database integrates
-[Grafeo](https://github.com/grafeo-db/grafeo) (v0.5.13) as its query engine, implementing Grafeo's
+[Grafeo](https://github.com/GrafeoDB/grafeo) (v0.5.18) as its query engine, implementing Grafeo's
 `GraphStore` and `GraphStoreMut` traits over SlateDB's ordered key-value interface. The design maps
 graph primitives: nodes, edges, labels, properties and adjacency, to SlateDB records using the
 standard 2-byte key prefix, with additional index structures for label lookups, property searches,
@@ -78,9 +78,9 @@ The graph engine introduces the following external crate dependencies:
 
 | Crate            | Version | Role                                                                                                                                     |
 |------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------|
-| `grafeo-core`    | 0.5.13  | Graph storage traits (`GraphStore`, `GraphStoreMut`), core types (`Node`, `Edge`, `NodeId`, `EdgeId`, `Value`, `PropertyKey`)            |
-| `grafeo-common`  | 0.5.13  | Shared primitives (`NodeId`, `EdgeId`, `EpochId`, `Value` enum, MVCC types)                                                              |
-| `grafeo-engine`  | 0.5.13  | Query engine: GQL parser, cost-based optimizer, push-based vectorized executor. GQL is the primary query interface and is always enabled |
+| `grafeo-core`    | 0.5.18  | Graph storage traits (`GraphStore`, `GraphStoreMut`), core types (`Node`, `Edge`, `NodeId`, `EdgeId`, `Value`, `PropertyKey`)            |
+| `grafeo-common`  | 0.5.18  | Shared primitives (`NodeId`, `EdgeId`, `EpochId`, `Value` enum, MVCC types)                                                              |
+| `grafeo-engine`  | 0.5.18  | Query engine: GQL parser, cost-based optimizer, push-based vectorized executor. GQL is the primary query interface and is always enabled |
 
 Grafeo is published on crates.io. All three crates are required dependencies. The graph database
 always includes the GQL query engine, there is no "storage-only" deployment mode. Additional query
@@ -161,42 +161,13 @@ writes.
 
 ### Background on Grafeo's Storage Traits
 
-This RFC focuses on the SlateDB record layout, but understanding how Grafeo's query engine
-interacts with the storage layer motivates the design.
+Grafeo's `GraphStore` trait defines the read interface: point lookups by ID, versioned lookups
+for MVCC, individual property access (with batch/selective variants for projection pushdown),
+directional traversal (`Outgoing`/`Incoming`/`Both`), label-filtered scans, property-filtered
+searches, zone map skip pruning, and statistics for the cost-based optimizer.
 
-#### GraphStore (Read Path)
-
-Grafeo's `GraphStore` trait defines the read interface that scan, expand, filter, project, and
-shortest-path operators use. Key method groups:
-
-- **Point lookups**: `get_node(id)`, `get_edge(id)`, retrieve entities by ID, returning `Node`
-  (id, labels, properties) or `Edge` (id, src, dst, type, properties).
-- **Versioned lookups**: `get_node_versioned(id, epoch, tx_id)`, retrieve a node visible to a
-  specific transaction at a given epoch.
-- **Property access**: `get_node_property(id, key)`, batch variants, fast-path access without
-  loading the full entity.
-- **Traversal**: `neighbors(node, direction)`, `edges_from(node, direction)`, follow adjacency
-  in `Outgoing`, `Incoming`, or `Both` directions.
-- **Scans**: `node_ids()`, `nodes_by_label(label)`, enumerate nodes, optionally filtered by label.
-- **Filtered search**: `find_nodes_by_property(prop, value)`,
-  `find_nodes_in_range(prop, min, max)`, use indexes when available.
-- **Zone maps**: `node_property_might_match(prop, op, value)`, skip pruning for predicate
-  evaluation.
-- **Statistics**: `statistics()`, `estimate_label_cardinality(label)`,
-  `estimate_avg_degree(edge_type, outgoing)`, feed the cost-based optimizer.
-
-#### GraphStoreMut (Write Path)
-
-The `GraphStoreMut` trait extends `GraphStore` with mutation methods:
-
-- **Create**: `create_node(labels)`, `create_edge(src, dst, type)`, allocate IDs and persist
-  records.
-- **Delete**: `delete_node(id)`, `delete_edge(id)`, `delete_node_edges(node_id)`, mark entities
-  as deleted in the current epoch.
-- **Properties**: `set_node_property(id, key, value)`, `remove_node_property(id, key)`, mutate
-  property maps.
-- **Labels**: `add_label(node_id, label)`, `remove_label(node_id, label)`, modify node labels.
-- **Batch**: `batch_create_edges(edges)`, create multiple edges in one operation.
+`GraphStoreMut` extends `GraphStore` with mutations: create/delete nodes and edges, set/remove
+properties, add/remove labels, and batch edge creation.
 
 #### Core Types
 
@@ -264,34 +235,15 @@ monotonicity.
 ### Standard Key Prefix
 
 All records use the standard 2-byte prefix per [RFC 0001](../../rfcs/0001-record-key-prefix.md):
-a `u8` version byte and a `u8` record tag. The record tag encodes the record type in the high
-4 bits, with the low 4 bits reserved (set to `0x0` for now).
-
-```text
-record_tag byte layout:
-┌────────────┬────────────┐
-│  bits 7-4  │  bits 3-0  │
-│ record type│  reserved  │
-│   (1-15)   │    (0)     │
-└────────────┴────────────┘
-```
+a `u8` version byte (currently `0x01`) and a `u8` record tag. The record tag encodes the record
+type in the high 4 bits and a sub-type discriminant in the low 4 bits (used by Catalog and
+SeqBlock; `0x0` for all other record types).
 
 ### Common Encodings
 
-This RFC uses the common encodings defined in [RFC 0004](../../rfcs/0004-common-encodings.md):
-
-**Key encodings** (big-endian for lexicographic ordering):
-
-- `TerminatedBytes`: Variable-length byte sequences with escape sequences and `0x00` terminator
-- Sortable `i64`: XOR with `0x8000_0000_0000_0000`, big-endian (see `common::serde::sortable`).
-  The XOR flips the sign bit so that negative values sort before positive values in unsigned
-  lexicographic byte comparison.
-- Sortable `f64`: IEEE 754 sign-bit flip encoding, big-endian
-
-**Value encodings** (little-endian):
-
-- `Utf8`: `len: u16` followed by UTF-8 payload
-- `Array<T>`: `count: u16` followed by serialized elements
+Key encodings use the primitives defined in [RFC 0004](../../rfcs/0004-common-encodings.md):
+`TerminatedBytes` for variable-length keys, sortable `i64`/`f64` for ordered numeric keys
+(sign-bit flip, big-endian). Value fields are little-endian.
 
 ### Record Type Reference
 
@@ -305,9 +257,7 @@ This RFC uses the common encodings defined in [RFC 0004](../../rfcs/0004-common-
 | `0x60` | `BackwardAdj`      | Incoming adjacency: dst -> (edge_type, src, edge_id)    |
 | `0x70` | `LabelIndex`       | Label -> node ID mapping for label scans                |
 | `0x80` | `PropertyIndex`    | Sortable property value -> node ID for filtered search  |
-| `0x90` | `CatalogLabel`     | Label name <-> LabelId dictionary                       |
-| `0x91` | `CatalogEdgeType`  | Edge type name <-> EdgeTypeId dictionary                |
-| `0x92` | `CatalogPropKey`   | Property key name <-> PropertyKeyId dictionary          |
+| `0x9_` | `Catalog`          | Name ↔ ID dictionaries (6 sub-types via reserved bits) |
 | `0xB0` | `ZoneMap`          | Per-property min/max for skip pruning                   |
 | `0xE0` | `Metadata`         | Global counters (node count, edge count, current epoch) |
 | `0xE1` | `Statistics`       | Cardinality estimates, degree histograms                |
@@ -339,7 +289,7 @@ node coexist in the LSM tree, and the reader selects the version visible at its 
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│                    NodeRecordValue                      │
+│                    NodeRecordValue                     │
 ├────────────────────────────────────────────────────────┤
 │  flags:       u16 (LE)                                 │
 │  label_count: u16 (LE)                                 │
@@ -393,14 +343,17 @@ Stores the existence of an edge, its source and destination nodes, edge type, an
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│                    EdgeRecordValue                      │
+│                    EdgeRecordValue                     │
 ├────────────────────────────────────────────────────────┤
-│  flags:        u16 (LE)                                │
 │  src_node_id:  u64 (LE)                                │
 │  dst_node_id:  u64 (LE)                                │
 │  edge_type_id: u32 (LE)                                │
+│  flags:        u16 (LE)                                │
+│  prop_count:   u16 (LE)                                │
 └────────────────────────────────────────────────────────┘
 ```
+
+Total: 24 bytes.
 
 **Flags:** Same as `NodeRecord` (bit 0 = `DELETED`).
 
@@ -440,13 +393,14 @@ reflects the state after the most recent `set_node_property` or `remove_node_pro
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│                  NodePropertyValue                      │
+│                  NodePropertyValue                     │
 ├────────────────────────────────────────────────────────┤
-│  value: TaggedValue                                    │
+│  value: Value::serialize() bytes                       │
 └────────────────────────────────────────────────────────┘
 ```
 
-Where `TaggedValue` is defined in the "Value Serialization" section below.
+Property values are serialized using Grafeo's native `Value::serialize()` format (see the
+"Value Serialization" section below).
 
 **Deletion:**
 
@@ -545,17 +499,11 @@ Mirror of `ForwardAdj` with source and destination swapped.
 Backward adjacency is always maintained. While Grafeo allows disabling backward edges via
 `Config::backward_edges`, the SlateDB implementation always writes backward adjacency entries.
 
-**Cost:** Each backward adjacency key is 30 bytes (2-byte prefix + 8-byte dst + 4-byte type +
-8-byte src + 8-byte edge_id) with an empty value. For a graph with N edges, this adds N keys
-totaling ~30N bytes of key data. For example, a 100M-edge graph adds ~3 GB of backward adjacency
-keys and doubles the write amplification per edge creation (one extra PUT per edge).
-
-**Justification:** The benefit is that `Incoming` and `Both` direction traversal are first-class
-operations without full-graph scans. Graph workloads frequently require bidirectional traversal
-(e.g., "who follows this user?" or "what depends on this service?"), and without backward adjacency,
-answering these queries requires scanning all ForwardAdj records. The per-edge storage overhead is
-small relative to the total record set (each edge already produces an EdgeRecord + ForwardAdj +
-potential property records).
+**Cost and justification:** Each backward adjacency key is 30 bytes with an empty value, adding
+one extra PUT per edge creation. For N edges this adds ~30N bytes (e.g., ~3 GB for 100M edges).
+This is small relative to the total record set (each edge already produces an EdgeRecord +
+ForwardAdj + property records), and the benefit is first-class `Incoming`/`Both` traversal without
+scanning all ForwardAdj records.
 
 ### `LabelIndex` (`0x70`)
 
@@ -613,19 +561,18 @@ have `PropertyIndex` entries.
 
 **SortableValue Encoding:**
 
+The `value_term` is the raw sortable encoding of the property value, without a type tag prefix.
+Since each `PropertyIndex` key is scoped to a single `property_key_id`, all values within a prefix
+scan are the same type.
+
 ```text
-┌──────────────────────────────────────────────────┐
-│ tag: u8                                          │
-│ payload:                                         │
-│   Bool    (0x01) → u8 (0 or 1)                  │
-│   Int64   (0x02) → sortable i64 (8 bytes BE)    │
-│   Float64 (0x03) → sortable f64 (8 bytes BE)    │
-│   String  (0x04) → TerminatedBytes              │
-└──────────────────────────────────────────────────┘
+Bool    → u8 (0 or 1)              (1 byte)
+Int64   → sortable i64             (8 bytes BE)
+Float64 → sortable f64             (8 bytes BE)
+String  → TerminatedBytes          (variable)
 ```
 
-The leading tag byte ensures values of different types sort into separate ranges. Within each type,
-the encoding preserves numeric/lexicographic ordering.
+Only these four types support sortable encoding; other `Value` types are not indexed.
 
 **Value Schema:** Empty.
 
@@ -647,84 +594,69 @@ To implement `find_nodes_in_range(property, min, max, min_inclusive, max_inclusi
 3. Range scan from `[prefix, property_key_id, min_encoded]` to `[prefix, property_key_id, max_encoded]`
 4. Apply inclusivity bounds
 
-### Catalog Records (`0x90` – `0x92`)
+### Catalog Records (`0x90` – `0x95`)
 
 The catalog maps human-readable names to compact integer IDs for labels, edge types, and property
-keys. On startup, all catalog records are loaded into an in-memory cache. Writes update both the
-cache and SlateDB atomically.
+keys. Each mapping is stored **bidirectionally**: an ID→name record for reverse lookups and a
+name→ID record for forward lookups. On startup, the ID→name records are scanned to populate an
+in-memory bidirectional cache. Writes update both the cache and SlateDB atomically.
 
-Three sub-types share the `0x9_` prefix using the low nibble for discrimination.
+Six sub-types share the `0x9_` prefix, using the low nibble (reserved bits) of the record tag for
+discrimination:
 
-#### `CatalogLabel` (`0x90`)
+| Tag  | CatalogKind        | Key Suffix        | Value        |
+|------|--------------------|-------------------|--------------|
+| 0x90 | LabelById          | id: u32 (BE)      | name (UTF-8) |
+| 0x91 | LabelByName        | name (UTF-8)      | id: u32 (LE) |
+| 0x92 | EdgeTypeById       | id: u32 (BE)      | name (UTF-8) |
+| 0x93 | EdgeTypeByName     | name (UTF-8)      | id: u32 (LE) |
+| 0x94 | PropertyKeyById    | id: u32 (BE)      | name (UTF-8) |
+| 0x95 | PropertyKeyByName  | name (UTF-8)      | id: u32 (LE) |
 
-**Key Layout:**
+#### By-ID Keys (`0x90`, `0x92`, `0x94`)
+
+```text
+┌─────────┬─────────────┬──────────┐
+│ version │ record_tag  │    id    │
+│ 1 byte  │   1 byte    │ 4 bytes  │
+└─────────┴─────────────┴──────────┘
+```
+
+Total: 6 bytes. Value is the name as raw UTF-8 bytes.
+
+#### By-Name Keys (`0x91`, `0x93`, `0x95`)
 
 ```text
 ┌─────────┬─────────────┬────────────────────┐
-│ version │ record_tag  │    label_name      │
-│ 1 byte  │   1 byte    │  TerminatedBytes   │
+│ version │ record_tag  │      name          │
+│ 1 byte  │   1 byte    │    raw UTF-8       │
 └─────────┴─────────────┴────────────────────┘
 ```
 
-**Value Schema:**
-
-```text
-┌────────────────────────────────────────────────┐
-│  label_id: u32 (LE)                            │
-└────────────────────────────────────────────────┘
-```
-
-#### `CatalogEdgeType` (`0x91`)
-
-**Key Layout:**
-
-```text
-┌─────────┬─────────────┬────────────────────┐
-│ version │ record_tag  │  edge_type_name    │
-│ 1 byte  │   1 byte    │  TerminatedBytes   │
-└─────────┴─────────────┴────────────────────┘
-```
-
-**Value Schema:**
-
-```text
-┌────────────────────────────────────────────────┐
-│  edge_type_id: u32 (LE)                        │
-└────────────────────────────────────────────────┘
-```
-
-#### `CatalogPropKey` (`0x92`)
-
-**Key Layout:**
-
-```text
-┌─────────┬─────────────┬────────────────────────┐
-│ version │ record_tag  │  property_key_name     │
-│ 1 byte  │   1 byte    │   TerminatedBytes      │
-└─────────┴─────────────┴────────────────────────┘
-```
-
-**Value Schema:**
-
-```text
-┌────────────────────────────────────────────────┐
-│  property_key_id: u32 (LE)                     │
-└────────────────────────────────────────────────┘
-```
+Variable length. Value is the `u32 (LE)` ID.
 
 **Catalog Loading:**
 
-On startup, prefix scan `[0x01, 0x90]`, `[0x01, 0x91]`, and `[0x01, 0x92]` to populate the
-in-memory bidirectional maps (name → ID and ID → name). The catalog is expected to be small
-(thousands of entries at most), so full loading is practical.
+On startup, prefix scan `[0x01, 0x90]`, `[0x01, 0x92]`, and `[0x01, 0x94]` (the by-ID sub-types)
+to populate the in-memory bidirectional maps (name → ID and ID → name). The by-name records exist
+for potential future use (e.g., name uniqueness checks at the storage level) but are not read during
+normal loading. The catalog is expected to be small (thousands of entries at most), so full loading
+is practical.
 
 **ID Assignment:**
 
 New catalog entries use incrementing IDs starting from 0. The next available ID for each catalog
-type is derived from the maximum ID seen during loading + 1. This assumes single-writer semantics:
-only one process writes to the catalog at a time. Concurrent writers loading the catalog
+type is derived from the count of entries loaded from the by-ID scan. This assumes single-writer
+semantics: only one process writes to the catalog at a time. Concurrent writers loading the catalog
 independently could assign duplicate IDs. This is consistent with OpenData's current single-writer
 model per database instance.
+
+**Write Path:**
+
+When a new name is encountered (e.g., a new label "Person"), two records are written atomically:
+
+1. By-ID: `[0x01, 0x90, id_be]` → `"Person"` (UTF-8 bytes)
+2. By-Name: `[0x01, 0x91, terminated("Person")]` → `id_le` (4 bytes)
 
 ### `ZoneMap` (`0xB0`)
 
@@ -745,12 +677,12 @@ matches exist, the scan is skipped entirely.
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│                     ZoneMapValue                        │
+│                     ZoneMapValue                       │
 ├────────────────────────────────────────────────────────┤
 │  value_type: u8  (type tag from Value enum)            │
-│  min:        TaggedValue                               │
-│  max:        TaggedValue                               │
-│  count:      u64 (LE), number of non-null values      │
+│  min:        Value::serialize() bytes                  │
+│  max:        Value::serialize() bytes                  │
+│  count:      u64 (LE), number of non-null values       │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -783,10 +715,9 @@ well-known keys.
 
 | Key    | Name           | Value Type | Description                       |
 |--------|----------------|------------|-----------------------------------|
-| `0x01` | `NodeCount`    | u64 (LE)   | Total live (non-deleted) nodes    |
-| `0x02` | `EdgeCount`    | u64 (LE)   | Total live (non-deleted) edges    |
-| `0x03` | `Epoch`        | u64 (LE)   | Current global MVCC epoch         |
-| `0x04` | `LabelCount`   | varies     | Per-label node counts (see below) |
+| `0x00` | `NodeCount`    | u64 (LE)   | Total live (non-deleted) nodes    |
+| `0x01` | `EdgeCount`    | u64 (LE)   | Total live (non-deleted) edges    |
+| `0x02` | `CurrentEpoch` | u64 (LE)   | Current global MVCC epoch         |
 
 **Merge Operator:**
 
@@ -794,7 +725,7 @@ well-known keys.
 (create or delete) issues a merge with a signed delta (`+1` or `-1`). The merge function sums
 all deltas.
 
-`Epoch` is updated via a simple `put` (not merge) when the epoch advances.
+`CurrentEpoch` is updated via a simple `put` (not merge) when the epoch advances.
 
 ### `Statistics` (`0xE1`)
 
@@ -850,18 +781,22 @@ suffix) to allow incremental updates.
 ### `SeqBlock` (`0xF0`)
 
 Stores sequence allocation state for node and edge ID generation. Two `SeqBlock` records exist:
-one for node IDs and one for edge IDs.
+one for node IDs and one for edge IDs. The sequence kind is encoded in the reserved bits of the
+record tag (same pattern as catalog sub-types).
 
 **Key Layout:**
 
 ```text
-┌─────────┬─────────────┬──────────┐
-│ version │ record_tag  │ seq_type │
-│ 1 byte  │   1 byte    │  1 byte  │
-└─────────┴─────────────┴──────────┘
+┌─────────┬─────────────┐
+│ version │ record_tag  │
+│ 1 byte  │   1 byte    │
+└─────────┴─────────────┘
 ```
 
-- `seq_type` (u8): `0x01` for node IDs, `0x02` for edge IDs
+Total: 2 bytes.
+
+- `0xF0`: Node ID sequence (`SequenceKind::NodeId = 0` in reserved bits)
+- `0xF1`: Edge ID sequence (`SequenceKind::EdgeId = 1` in reserved bits)
 
 **Value Schema:**
 
@@ -876,39 +811,20 @@ one for node IDs and one for edge IDs.
 
 Follows the same allocation pattern as the common crate's `SequenceAllocator`.
 
-### Value Serialization (`TaggedValue`)
+### Value Serialization
 
-Property values are serialized as a type tag followed by a type-specific payload. This format
-is used in `NodeProperty`/`EdgeProperty` values and `ZoneMap` min/max fields.
+Property values (`NodeProperty` / `EdgeProperty` values) are serialized using Grafeo's native
+`Value::serialize()` and deserialized with `Value::deserialize()`. This delegates the wire format
+entirely to `grafeo-common`, ensuring that the storage layer is always compatible with the query
+engine's type system without maintaining a separate encoding.
 
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│                          TaggedValue                                 │
-├──────────────────────────────────────────────────────────────────────┤
-│  tag: u8  (Value variant discriminant)                               │
-│  payload: (depends on tag)                                           │
-│                                                                      │
-│  0x00 Null       → (no payload)                                      │
-│  0x01 Bool       → u8 (0 = false, 1 = true)                          │
-│  0x02 Int64      → i64 (LE)                                          │
-│  0x03 Float64    → f64 (LE)                                          │
-│  0x04 String     → Utf8                                              │
-│  0x05 Bytes      → len: u32 (LE), payload: [u8; len]                 │
-│  0x06 Timestamp  → i64 (LE) microseconds since Unix epoch            │
-│  0x07 Date       → i32 (LE) days since Unix epoch                    │
-│  0x08 Time       → i64 (LE) nanoseconds since midnight,              │
-│                    has_offset: u8, offset: i32 (LE) seconds          │
-│  0x09 Duration   → months: i32 (LE), days: i32 (LE),                 │
-│                    nanos: i64 (LE)                                   │
-│  0x0A ZonedDT    → micros: i64 (LE), offset_secs: i32 (LE)           │
-│  0x0B List       → count: u32 (LE), elements: [TaggedValue; count]   │
-│  0x0C Map        → count: u32 (LE),                                  │
-│                    entries: [(Utf8 key, TaggedValue value); count]   │
-│  0x0D Vector     → dims: u32 (LE), elements: [f32 LE; dims]          │
-│  0x0E Path       → node_count: u32 (LE), nodes: [TaggedValue],       │
-│                    edge_count: u32 (LE), edges: [TaggedValue]        │
-└──────────────────────────────────────────────────────────────────────┘
-```
+The `Value` enum supports all types listed in the Core Types section above (Null, Bool, Int64,
+Float64, String, Bytes, Timestamp, Date, Time, Duration, ZonedDatetime, List, Map, Vector, Path).
+See Grafeo's `grafeo-common` crate documentation for the exact binary format.
+
+**Note:** The `SortableValue` encoding used in `PropertyIndex` keys (see PropertyIndex section) is
+a separate, sort-preserving encoding distinct from `Value::serialize()`. Only Bool, Int64, Float64,
+and String values support sortable encoding; other types return `None` and are not indexed.
 
 ### MVCC Model
 
@@ -974,11 +890,11 @@ create_node_with_props(["Person", "Employee"], [("name", "Alice"), ("age", 30)])
 
 WriteBatch:
   PUT [0x01, 0x10, node_id, E]           → NodeRecordValue { flags: 0, labels: [0, 1] }
-  PUT [0x01, 0x30, node_id, PropKeyId(0)] → TaggedValue(String, "Alice")
-  PUT [0x01, 0x30, node_id, PropKeyId(1)] → TaggedValue(Int64, 30)
+  PUT [0x01, 0x30, node_id, PropKeyId(0)] → Value::serialize(String("Alice"))
+  PUT [0x01, 0x30, node_id, PropKeyId(1)] → Value::serialize(Int64(30))
   PUT [0x01, 0x70, LabelId(0), node_id]  → (empty)
   PUT [0x01, 0x70, LabelId(1), node_id]  → (empty)
-  MERGE [0x01, 0xE0, 0x01]               → +1  (NodeCount)
+  MERGE [0x01, 0xE0, 0x00]               → +1  (NodeCount)
   MERGE [0x01, 0xB0, PropKeyId(1)]       → ZoneMap extend(30)
 ```
 
@@ -995,7 +911,7 @@ WriteBatch:
   PUT [0x01, 0x20, edge_id, E]                                → EdgeRecordValue { src: 1, dst: 2, type: 0 }
   PUT [0x01, 0x50, NodeId(1), EdgeTypeId(0), NodeId(2), edge_id] → (empty)
   PUT [0x01, 0x60, NodeId(2), EdgeTypeId(0), NodeId(1), edge_id] → (empty)
-  MERGE [0x01, 0xE0, 0x02]                                    → +1  (EdgeCount)
+  MERGE [0x01, 0xE0, 0x01]                                    → +1  (EdgeCount)
 ```
 
 ### Read Path: Assembling a Full Node
@@ -1010,61 +926,16 @@ get_node(NodeId(42)) at epoch E:
 3. Decode NodeRecordValue → label_ids = [0, 1]
 4. Resolve labels via catalog: LabelId(0) → "Person", LabelId(1) → "Employee"
 5. Prefix scan [0x01, 0x30, 42_be] → all properties for node 42
-6. Decode each TaggedValue, resolve property key names via catalog
+6. Decode each Value (via Value::deserialize), resolve property key names via catalog
 7. Return Node { id: 42, labels: ["Person", "Employee"], properties: { "name": "Alice", "age": 30 } }
 ```
 
-**Performance note:** Grafeo's `Node` struct includes a full `PropertyMap`, so `get_node` always
-loads all properties via a prefix scan. This makes `get_node` more expensive than a simple point
-lookup: it requires one seek for the NodeRecord plus one prefix scan for all NodeProperty records.
-Grafeo's query engine avoids this cost during execution by using targeted property access methods
-(`get_node_property`, `get_nodes_properties_selective_batch`) with projection pushdown, only
-loading the properties referenced in the query's `RETURN` or `WHERE` clauses. The full `get_node`
-path is primarily used for final result materialization when all properties are requested.
-
-### Trait Method Mapping
-
-The following table maps Grafeo `GraphStore` methods to SlateDB operations:
-
-| GraphStore Method                                      | SlateDB Operation                                                                        |
-|--------------------------------------------------------|------------------------------------------------------------------------------------------|
-| `get_node(id)`                                         | Seek `NodeRecord` + prefix scan `NodeProperty`                                           |
-| `get_edge(id)`                                         | Seek `EdgeRecord` + prefix scan `EdgeProperty`                                           |
-| `get_node_versioned(id, epoch, tx)`                    | Seek `NodeRecord`, filter by epoch                                                       |
-| `get_node_property(id, key)`                           | Point get `NodeProperty(id, key_id)`                                                     |
-| `get_node_property_batch(ids, key)`                    | Multi-get `NodeProperty`                                                                 |
-| `get_nodes_properties_selective_batch(ids, keys)`      | Multi-get `NodeProperty` for each (id, key)                                              |
-| `neighbors(node, dir)`                                 | Prefix scan `ForwardAdj` and/or `BackwardAdj`                                            |
-| `edges_from(node, dir)`                                | Prefix scan `ForwardAdj` and/or `BackwardAdj`                                            |
-| `out_degree(node)`                                     | Count keys in `ForwardAdj` prefix scan                                                   |
-| `in_degree(node)`                                      | Count keys in `BackwardAdj` prefix scan                                                  |
-| `node_ids()`                                           | Full scan of `NodeRecord`, filter non-deleted (\*)                                       |
-| `nodes_by_label(label)`                                | Prefix scan `LabelIndex(label_id)`                                                       |
-| `node_count()`                                         | Read `Metadata(NodeCount)`                                                               |
-| `edge_count()`                                         | Read `Metadata(EdgeCount)`                                                               |
-| `find_nodes_by_property(p, v)`                         | Prefix scan `PropertyIndex(p_id, sortable_v)`                                            |
-| `find_nodes_in_range(p, min, max)`                     | Range scan `PropertyIndex(p_id, min..max)`                                               |
-| `node_property_might_match(p, op, v)`                  | Read `ZoneMap(p_id)`, check min/max                                                      |
-| `statistics()`                                         | Return cached `Statistics` (loaded on startup)                                           |
-| `estimate_label_cardinality(l)`                        | Lookup in cached `Statistics`                                                            |
-| `current_epoch()`                                      | Return in-memory epoch counter                                                           |
-
-| GraphStoreMut Method                                   | SlateDB Operation                                                                        |
-|--------------------------------------------------------|------------------------------------------------------------------------------------------|
-| `create_node(labels)`                                  | WriteBatch: `NodeRecord` + `LabelIndex` entries + merge `NodeCount`                      |
-| `create_edge(src, dst, type)`                          | WriteBatch: `EdgeRecord` + `ForwardAdj` + `BackwardAdj` + merge `EdgeCount`              |
-| `delete_node(id)`                                      | WriteBatch: `NodeRecord(DELETED)` + tombstone labels/properties/adj + merge `NodeCount`  |
-| `delete_edge(id)`                                      | WriteBatch: `EdgeRecord(DELETED)` + tombstone adj entries + merge `EdgeCount`            |
-| `set_node_property(id, k, v)`                          | Put `NodeProperty(id, k_id)` + merge `ZoneMap` + update `PropertyIndex`                  |
-| `remove_node_property(id, k)`                          | Tombstone `NodeProperty(id, k_id)` + tombstone `PropertyIndex`                           |
-| `add_label(node, l)`                                   | Put `LabelIndex(l_id, node)` + update `NodeRecord`                                       |
-| `remove_label(node, l)`                                | Tombstone `LabelIndex(l_id, node)` + update `NodeRecord`                                 |
-| `batch_create_edges(edges)`                            | Single WriteBatch with all edge records and adjacency entries                            |
-
-(\*) `node_ids()` performs a full scan of all `NodeRecord` entries, which is expensive for large
-graphs (O(N) where N is total node versions). The query engine avoids this path when possible by
-using `nodes_by_label` or property-filtered searches. `node_ids()` is primarily used for
-unfiltered `MATCH (n)` patterns without label or property predicates.
+The mapping from trait methods to SlateDB operations is straightforward: each trait method maps
+to the record type described above (e.g., `get_node` seeks a `NodeRecord` + prefix scans
+`NodeProperty`; `edges_from` prefix scans `ForwardAdj`/`BackwardAdj`; `nodes_by_label` prefix
+scans `LabelIndex`). The write path examples above show the full record sets for create
+operations. `node_ids()` is the only expensive operation (full `NodeRecord` scan, O(N)); the
+query engine avoids it when label or property predicates are available.
 
 ## Alternatives
 
@@ -1196,6 +1067,8 @@ Future RFCs will address:
 
 ## Updates
 
-| Date       | Description   |
-|------------|---------------|
-| 2026-03-05 | Initial draft |
+| Date       | Description                                                         |
+|------------|---------------------------------------------------------------------|
+| 2026-03-05 | Initial draft                                                       |
+| 2026-03-08 | Aligned with test implementation: catalog 6 sub-types, metadata keys,    |
+|            | EdgeRecordValue field order, SeqBlock reserved bits, Grafeo v0.5.18 |

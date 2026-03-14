@@ -3,12 +3,12 @@ pub mod merge_operator;
 mod reader;
 mod writer;
 
-use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use common::SequenceAllocator;
-use common::storage::Storage;
+use common::storage::{Storage, StorageError};
 use tokio::runtime::Handle;
 use tracing::info;
 
@@ -22,16 +22,15 @@ use catalog::Catalog;
 /// Graph storage adapter that implements Grafeo's `GraphStore` + `GraphStoreMut`
 /// traits over OpenData's `Storage` (SlateDB) abstraction.
 ///
-/// All trait methods are synchronous (per Grafeo's trait design), but SlateDB
-/// operations are async. The bridge uses `tokio::task::block_in_place` + `block_on`
-/// to execute one async operation per trait method call.
+/// Concurrency control is delegated to SlateDB transactions. Read-then-write
+/// operations (delete, label mutations) use `StorageTransaction` for atomicity.
+/// Write-only operations use `WriteBatch` via `Storage::apply()`.
 pub struct SlateGraphStore {
     storage: Arc<dyn Storage>,
     rt: Handle,
     catalog: parking_lot::RwLock<Catalog>,
     node_seq: Mutex<SequenceAllocator>,
     edge_seq: Mutex<SequenceAllocator>,
-    current_epoch: AtomicU64,
     node_count: AtomicI64,
     edge_count: AtomicI64,
     backward_edges: bool,
@@ -59,9 +58,6 @@ impl SlateGraphStore {
         let edge_count = i64::from_le_bytes(
             load_metadata_bytes(storage.as_ref(), MetadataSubType::EdgeCount).await?,
         );
-        let epoch = u64::from_le_bytes(
-            load_metadata_bytes(storage.as_ref(), MetadataSubType::CurrentEpoch).await?,
-        );
 
         // Load catalog from storage
         let catalog = Catalog::load(storage.as_ref()).await?;
@@ -69,7 +65,6 @@ impl SlateGraphStore {
         info!(
             node_count,
             edge_count,
-            epoch,
             labels = catalog.label_count(),
             edge_types = catalog.edge_type_count(),
             "graph store loaded"
@@ -81,7 +76,6 @@ impl SlateGraphStore {
             catalog: parking_lot::RwLock::new(catalog),
             node_seq: Mutex::new(node_seq),
             edge_seq: Mutex::new(edge_seq),
-            current_epoch: AtomicU64::new(epoch),
             node_count: AtomicI64::new(node_count),
             edge_count: AtomicI64::new(edge_count),
             backward_edges: config.backward_edges,
@@ -94,6 +88,33 @@ impl SlateGraphStore {
         F: std::future::Future<Output = common::storage::StorageResult<T>>,
     {
         tokio::task::block_in_place(|| self.rt.block_on(f)).map_err(Error::from)
+    }
+
+    /// Executes a transactional operation with retry on conflict.
+    ///
+    /// The closure receives a reference to the storage and should create a
+    /// transaction, perform reads/writes, and commit. On `TransactionConflict`,
+    /// the operation is retried up to 3 times.
+    fn exec_txn<F, T>(&self, f: F) -> Result<T>
+    where
+        F: Fn(
+            &dyn Storage,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = common::storage::StorageResult<T>> + Send + '_>,
+        >,
+    {
+        const MAX_RETRIES: usize = 3;
+        for attempt in 0..MAX_RETRIES {
+            match tokio::task::block_in_place(|| self.rt.block_on(f(self.storage.as_ref()))) {
+                Ok(val) => return Ok(val),
+                Err(StorageError::TransactionConflict) if attempt < MAX_RETRIES - 1 => {
+                    tracing::debug!("transaction conflict, retrying (attempt {})", attempt + 1);
+                    continue;
+                }
+                Err(e) => return Err(Error::from(e)),
+            }
+        }
+        Err(Error::Internal("transaction retries exhausted".to_string()))
     }
 }
 
