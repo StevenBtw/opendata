@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use common::{StorageConfig, StorageRuntime, StorageSemantics};
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::traits::{GraphStore, GraphStoreMut};
 use graph::db::GraphDb;
@@ -793,7 +793,7 @@ async fn versioned_read_delegates_to_current() {
 
     // Versioned read should return the same result regardless of epoch/tx
     assert_eq!(
-        s.get_node_versioned(id, EpochId(0), TxId(0))
+        s.get_node_versioned(id, EpochId(0), TransactionId(0))
             .map(|n| n.id),
         s.get_node(id).map(|n| n.id),
         "versioned read should delegate to current state"
@@ -801,7 +801,7 @@ async fn versioned_read_delegates_to_current() {
 
     // After deletion, versioned read should also return None
     s.delete_node(id);
-    assert!(s.get_node_versioned(id, EpochId(0), TxId(0)).is_none());
+    assert!(s.get_node_versioned(id, EpochId(0), TransactionId(0)).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -827,7 +827,7 @@ async fn versioned_edge_delegates_to_current() {
     let eid = s.create_edge(a, b, "KNOWS");
 
     assert!(
-        s.get_edge_versioned(eid, EpochId(0), TxId(0)).is_some(),
+        s.get_edge_versioned(eid, EpochId(0), TransactionId(0)).is_some(),
         "versioned edge read should find the edge"
     );
 }

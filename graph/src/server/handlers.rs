@@ -81,6 +81,14 @@ fn grafeo_value_to_json(v: &grafeo_common::types::Value) -> serde_json::Value {
         Value::Vector(v) => {
             serde_json::Value::Array(v.iter().map(|f| serde_json::json!(f)).collect())
         }
+        Value::Date(d) => serde_json::json!(d.to_string()),
+        Value::Time(t) => serde_json::json!(t.to_string()),
+        Value::Duration(d) => serde_json::json!(d.to_string()),
+        Value::ZonedDatetime(zdt) => serde_json::json!(zdt.to_string()),
+        Value::Path { nodes, edges } => serde_json::json!({
+            "nodes": nodes.iter().map(grafeo_value_to_json).collect::<Vec<_>>(),
+            "edges": edges.iter().map(grafeo_value_to_json).collect::<Vec<_>>(),
+        }),
     }
 }
 

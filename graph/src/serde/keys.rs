@@ -2,7 +2,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use common::BytesRange;
 use common::serde::DeserializeError;
 use common::serde::key_prefix::{KeyPrefix, RecordTag};
-use common::serde::terminated_bytes;
 use std::ops::Bound;
 
 use super::{CatalogKind, KEY_VERSION, MetadataSubType, RecordType, SequenceKind};
@@ -428,9 +427,9 @@ impl CatalogByNameKey {
         encode_key(
             RecordType::Catalog,
             self.kind as u8,
-            2 + self.name.len() + 2,
+            2 + self.name.len(),
             |buf| {
-                terminated_bytes::serialize(&self.name, buf);
+                buf.extend_from_slice(&self.name);
             },
         )
     }
@@ -439,8 +438,7 @@ impl CatalogByNameKey {
     pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
         let prefix = decode_prefix(data, 3, RecordType::Catalog, "CatalogByName")?;
         let kind = CatalogKind::try_from(prefix.tag().reserved())?;
-        let mut remaining = &data[2..];
-        let name = terminated_bytes::deserialize(&mut remaining)?;
+        let name = Bytes::copy_from_slice(&data[2..]);
         Ok(Self { kind, name })
     }
 }

@@ -33,7 +33,6 @@ pub struct SlateGraphStore {
     edge_seq: Mutex<SequenceAllocator>,
     node_count: AtomicI64,
     edge_count: AtomicI64,
-    backward_edges: bool,
 }
 
 impl SlateGraphStore {
@@ -41,7 +40,7 @@ impl SlateGraphStore {
     ///
     /// Loads catalog, metadata counters, and sequence allocators from existing
     /// data, or initializes them for a fresh database.
-    pub async fn new(storage: Arc<dyn Storage>, config: &Config) -> Result<Self> {
+    pub async fn new(storage: Arc<dyn Storage>, _config: &Config) -> Result<Self> {
         let rt = Handle::current();
 
         // Load sequence allocators
@@ -78,7 +77,6 @@ impl SlateGraphStore {
             edge_seq: Mutex::new(edge_seq),
             node_count: AtomicI64::new(node_count),
             edge_count: AtomicI64::new(edge_count),
-            backward_edges: config.backward_edges,
         })
     }
 

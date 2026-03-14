@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_core::graph::traits::{GraphStore, GraphStoreMut};
 
 use super::SlateGraphStore;
@@ -59,7 +59,12 @@ impl GraphStoreMut for SlateGraphStore {
         NodeId(node_id)
     }
 
-    fn create_node_versioned(&self, labels: &[&str], _epoch: EpochId, _tx_id: TxId) -> NodeId {
+    fn create_node_versioned(
+        &self,
+        labels: &[&str],
+        _epoch: EpochId,
+        _transaction_id: TransactionId,
+    ) -> NodeId {
         self.create_node(labels)
     }
 
@@ -99,15 +104,13 @@ impl GraphStoreMut for SlateGraphStore {
         };
         ops.push(put_record(fwd_key.encode(), Bytes::new()));
 
-        if self.backward_edges {
-            let bwd_key = BackwardAdjKey {
-                dst: dst.0,
-                edge_type_id: type_id,
-                src: src.0,
-                edge_id,
-            };
-            ops.push(put_record(bwd_key.encode(), Bytes::new()));
-        }
+        let bwd_key = BackwardAdjKey {
+            dst: dst.0,
+            edge_type_id: type_id,
+            src: src.0,
+            edge_id,
+        };
+        ops.push(put_record(bwd_key.encode(), Bytes::new()));
 
         ops.push(counter_merge(MetadataSubType::EdgeCount, 1));
 
@@ -123,7 +126,7 @@ impl GraphStoreMut for SlateGraphStore {
         dst: NodeId,
         edge_type: &str,
         _epoch: EpochId,
-        _tx_id: TxId,
+        _transaction_id: TransactionId,
     ) -> EdgeId {
         self.create_edge(src, dst, edge_type)
     }
@@ -192,7 +195,12 @@ impl GraphStoreMut for SlateGraphStore {
         }
     }
 
-    fn delete_node_versioned(&self, id: NodeId, _epoch: EpochId, _tx_id: TxId) -> bool {
+    fn delete_node_versioned(
+        &self,
+        id: NodeId,
+        _epoch: EpochId,
+        _transaction_id: TransactionId,
+    ) -> bool {
         self.delete_node(id)
     }
 
@@ -211,13 +219,11 @@ impl GraphStoreMut for SlateGraphStore {
         }
 
         // Delete incoming edges
-        if self.backward_edges
-            && let Ok(records) = self.exec(async {
-                self.storage
-                    .scan(BackwardAdjKey::dst_prefix(node_id.0))
-                    .await
-            })
-        {
+        if let Ok(records) = self.exec(async {
+            self.storage
+                .scan(BackwardAdjKey::dst_prefix(node_id.0))
+                .await
+        }) {
             for record in &records {
                 if let Ok(key) = BackwardAdjKey::decode(&record.key) {
                     self.delete_edge(EdgeId(key.edge_id));
@@ -227,7 +233,6 @@ impl GraphStoreMut for SlateGraphStore {
     }
 
     fn delete_edge(&self, id: EdgeId) -> bool {
-        let backward_edges = self.backward_edges;
         let result = self.exec_txn(|storage| {
             let edge_key = EdgeRecordKey { edge_id: id.0 }.encode();
             Box::pin(async move {
@@ -253,15 +258,13 @@ impl GraphStoreMut for SlateGraphStore {
                 };
                 txn.delete(fwd.encode())?;
 
-                if backward_edges {
-                    let bwd = BackwardAdjKey {
-                        dst: edge_val.dst,
-                        edge_type_id: edge_val.type_id,
-                        src: edge_val.src,
-                        edge_id: id.0,
-                    };
-                    txn.delete(bwd.encode())?;
-                }
+                let bwd = BackwardAdjKey {
+                    dst: edge_val.dst,
+                    edge_type_id: edge_val.type_id,
+                    src: edge_val.src,
+                    edge_id: id.0,
+                };
+                txn.delete(bwd.encode())?;
 
                 // Delete edge properties
                 let prop_records = txn
@@ -294,7 +297,12 @@ impl GraphStoreMut for SlateGraphStore {
         }
     }
 
-    fn delete_edge_versioned(&self, id: EdgeId, _epoch: EpochId, _tx_id: TxId) -> bool {
+    fn delete_edge_versioned(
+        &self,
+        id: EdgeId,
+        _epoch: EpochId,
+        _transaction_id: TransactionId,
+    ) -> bool {
         self.delete_edge(id)
     }
 

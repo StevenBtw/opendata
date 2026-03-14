@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arcstr::ArcStr;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::CompareOp;
@@ -33,11 +33,29 @@ impl GraphStore for SlateGraphStore {
         self.build_edge(id, &val).ok()
     }
 
-    fn get_node_versioned(&self, id: NodeId, _epoch: EpochId, _tx_id: TxId) -> Option<Node> {
+    fn get_node_at_epoch(&self, id: NodeId, _epoch: EpochId) -> Option<Node> {
         self.get_node(id)
     }
 
-    fn get_edge_versioned(&self, id: EdgeId, _epoch: EpochId, _tx_id: TxId) -> Option<Edge> {
+    fn get_edge_at_epoch(&self, id: EdgeId, _epoch: EpochId) -> Option<Edge> {
+        self.get_edge(id)
+    }
+
+    fn get_node_versioned(
+        &self,
+        id: NodeId,
+        _epoch: EpochId,
+        _transaction_id: TransactionId,
+    ) -> Option<Node> {
+        self.get_node(id)
+    }
+
+    fn get_edge_versioned(
+        &self,
+        id: EdgeId,
+        _epoch: EpochId,
+        _transaction_id: TransactionId,
+    ) -> Option<Edge> {
         self.get_edge(id)
     }
 
@@ -127,8 +145,7 @@ impl GraphStore for SlateGraphStore {
             }
         }
 
-        if self.backward_edges
-            && matches!(direction, Direction::Incoming | Direction::Both)
+        if matches!(direction, Direction::Incoming | Direction::Both)
             && let Ok(records) =
                 self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
         {
@@ -156,8 +173,7 @@ impl GraphStore for SlateGraphStore {
             }
         }
 
-        if self.backward_edges
-            && matches!(direction, Direction::Incoming | Direction::Both)
+        if matches!(direction, Direction::Incoming | Direction::Both)
             && let Ok(records) =
                 self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
         {
@@ -178,16 +194,13 @@ impl GraphStore for SlateGraphStore {
     }
 
     fn in_degree(&self, node: NodeId) -> usize {
-        if !self.backward_edges {
-            return 0;
-        }
         self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
             .map(|records| records.len())
             .unwrap_or(0)
     }
 
     fn has_backward_adjacency(&self) -> bool {
-        self.backward_edges
+        true
     }
 
     fn node_ids(&self) -> Vec<NodeId> {
