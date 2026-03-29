@@ -18,5 +18,5 @@ pub use storage::factory::{
 pub use storage::loader::{LoadMetadata, LoadResult, LoadSpec, Loadable, Loader};
 pub use storage::{
     MergeRecordOp, PutRecordOp, Record, Storage, StorageError, StorageIterator, StorageRead,
-    StorageResult, Ttl, WriteOptions, WriteResult,
+    StorageResult, StorageTransaction, Ttl, WriteOptions, WriteResult,
 };

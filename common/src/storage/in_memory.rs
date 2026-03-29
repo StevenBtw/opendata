@@ -447,6 +447,219 @@ impl Storage for InMemoryStorage {
         // No-op for in-memory storage
         Ok(())
     }
+
+    async fn begin_transaction(
+        &self,
+    ) -> StorageResult<Box<dyn super::StorageTransaction + Send>> {
+        let snapshot = self
+            .data
+            .read()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?
+            .clone();
+
+        Ok(Box::new(InMemoryTransaction {
+            snapshot,
+            pending_ops: std::sync::Mutex::new(Vec::new()),
+            parent_data: self.data.clone(),
+            merge_operator: self.merge_operator.clone(),
+            clock: self.clock.clone(),
+            default_ttl: self.default_ttl,
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InMemoryTransaction
+// ---------------------------------------------------------------------------
+
+/// In-memory transaction providing snapshot-isolated reads and buffered writes.
+///
+/// On `begin_transaction()`, a snapshot of the data is cloned. Reads come from
+/// a working copy that reflects buffered writes on top of the snapshot. On
+/// `commit()`, all buffered operations are applied to the parent storage
+/// atomically (under a single write lock acquisition).
+struct InMemoryTransaction {
+    /// Snapshot for reads (state at transaction start).
+    snapshot: BTreeMap<Bytes, StoredValue>,
+    /// Buffered operations to apply on commit.
+    pending_ops: std::sync::Mutex<Vec<TransactionOp>>,
+    /// Reference to parent storage data (for commit).
+    parent_data: Arc<RwLock<BTreeMap<Bytes, StoredValue>>>,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
+    clock: Arc<dyn Clock>,
+    default_ttl: Option<u64>,
+}
+
+enum TransactionOp {
+    Put(Bytes, Bytes),
+    Delete(Bytes),
+    Merge(Bytes, Bytes),
+}
+
+#[async_trait]
+impl StorageRead for InMemoryTransaction {
+    async fn get(&self, key: Bytes) -> StorageResult<Option<Record>> {
+        // Apply pending ops on top of snapshot for read-your-own-writes.
+        let pending = self
+            .pending_ops
+            .lock()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?;
+
+        // Walk pending ops in reverse to find the latest write for this key.
+        for op in pending.iter().rev() {
+            match op {
+                TransactionOp::Put(k, v) if *k == key => {
+                    return Ok(Some(Record::new(key, v.clone())));
+                }
+                TransactionOp::Delete(k) if *k == key => {
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+
+        // Fall back to snapshot.
+        let now = self.clock.now();
+        match self.snapshot.get(&key) {
+            Some(stored) if !stored.is_expired(now) => {
+                Ok(Some(Record::new(key, stored.value.clone())))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn scan_iter(
+        &self,
+        range: BytesRange,
+    ) -> StorageResult<Box<dyn StorageIterator + Send + 'static>> {
+        // Build a working copy: snapshot + pending ops applied.
+        let now = self.clock.now();
+        let pending = self
+            .pending_ops
+            .lock()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?;
+
+        let mut working = self.snapshot.clone();
+        for op in pending.iter() {
+            match op {
+                TransactionOp::Put(k, v) => {
+                    let expire_ts = compute_expire_ts(now, Ttl::Default, self.default_ttl);
+                    working.insert(
+                        k.clone(),
+                        StoredValue {
+                            value: v.clone(),
+                            expire_ts,
+                        },
+                    );
+                }
+                TransactionOp::Delete(k) => {
+                    working.remove(k);
+                }
+                TransactionOp::Merge(k, v) => {
+                    if let Some(merge_op) = &self.merge_operator {
+                        let existing = working
+                            .get(k)
+                            .filter(|s| !s.is_expired(now))
+                            .map(|s| s.value.clone());
+                        let merged = merge_op.merge_batch(k, existing, &[v.clone()]);
+                        let expire_ts = compute_expire_ts(now, Ttl::Default, self.default_ttl);
+                        working.insert(
+                            k.clone(),
+                            StoredValue {
+                                value: merged,
+                                expire_ts,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        let records: Vec<Record> = working
+            .range((range.start_bound().cloned(), range.end_bound().cloned()))
+            .filter(|(_, stored)| !stored.is_expired(now))
+            .map(|(k, stored)| Record::new(k.clone(), stored.value.clone()))
+            .collect();
+
+        Ok(Box::new(InMemoryIterator { records, index: 0 }))
+    }
+}
+
+#[async_trait]
+impl super::StorageTransaction for InMemoryTransaction {
+    fn put(&self, key: Bytes, value: Bytes) -> StorageResult<()> {
+        self.pending_ops
+            .lock()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?
+            .push(TransactionOp::Put(key, value));
+        Ok(())
+    }
+
+    fn delete(&self, key: Bytes) -> StorageResult<()> {
+        self.pending_ops
+            .lock()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?
+            .push(TransactionOp::Delete(key));
+        Ok(())
+    }
+
+    fn merge(&self, key: Bytes, value: Bytes) -> StorageResult<()> {
+        self.pending_ops
+            .lock()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?
+            .push(TransactionOp::Merge(key, value));
+        Ok(())
+    }
+
+    async fn commit(self: Box<Self>) -> StorageResult<()> {
+        let mut data = self
+            .parent_data
+            .write()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?;
+
+        let pending = self
+            .pending_ops
+            .lock()
+            .map_err(|e| StorageError::Internal(format!("lock poisoned: {e}")))?;
+
+        let now = self.clock.now();
+        for op in pending.iter() {
+            match op {
+                TransactionOp::Put(k, v) => {
+                    let expire_ts = compute_expire_ts(now, Ttl::Default, self.default_ttl);
+                    data.insert(
+                        k.clone(),
+                        StoredValue {
+                            value: v.clone(),
+                            expire_ts,
+                        },
+                    );
+                }
+                TransactionOp::Delete(k) => {
+                    data.remove(k);
+                }
+                TransactionOp::Merge(k, v) => {
+                    if let Some(merge_op) = &self.merge_operator {
+                        let existing = data
+                            .get(k)
+                            .filter(|s| !s.is_expired(now))
+                            .map(|s| s.value.clone());
+                        let merged = merge_op.merge_batch(k, existing, &[v.clone()]);
+                        let expire_ts = compute_expire_ts(now, Ttl::Default, self.default_ttl);
+                        data.insert(
+                            k.clone(),
+                            StoredValue {
+                                value: merged,
+                                expire_ts,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Injected failure that fires either once or on every call.
@@ -1459,5 +1672,113 @@ mod tests {
 
         let scanned = storage.scan(BytesRange::unbounded()).await.unwrap();
         assert_eq!(scanned.len(), 2);
+    }
+
+    // --- Transaction tests ---
+
+    #[tokio::test]
+    async fn should_read_and_write_within_transaction() {
+        let storage = InMemoryStorage::new();
+        storage
+            .put(vec![Record::new(Bytes::from("k1"), Bytes::from("v1")).into()])
+            .await
+            .unwrap();
+
+        let txn = storage.begin_transaction().await.unwrap();
+        let result = txn.get(Bytes::from("k1")).await.unwrap();
+        assert_eq!(result.unwrap().value, Bytes::from("v1"));
+
+        txn.put(Bytes::from("k2"), Bytes::from("v2")).unwrap();
+
+        // Read-your-own-writes within the transaction
+        let result = txn.get(Bytes::from("k2")).await.unwrap();
+        assert_eq!(result.unwrap().value, Bytes::from("v2"));
+
+        txn.commit().await.unwrap();
+
+        // After commit, writes are visible in parent
+        let result = storage.get(Bytes::from("k2")).await.unwrap();
+        assert_eq!(result.unwrap().value, Bytes::from("v2"));
+    }
+
+    #[tokio::test]
+    async fn should_not_see_concurrent_writes_in_transaction() {
+        let storage = InMemoryStorage::new();
+        storage
+            .put(vec![Record::new(Bytes::from("k1"), Bytes::from("v1")).into()])
+            .await
+            .unwrap();
+
+        let txn = storage.begin_transaction().await.unwrap();
+
+        // Write to parent after transaction started
+        storage
+            .put(vec![Record::new(Bytes::from("k2"), Bytes::from("v2")).into()])
+            .await
+            .unwrap();
+
+        // Transaction should NOT see the concurrent write
+        let result = txn.get(Bytes::from("k2")).await.unwrap();
+        assert!(result.is_none(), "transaction should not see concurrent writes");
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_rollback_on_drop() {
+        let storage = InMemoryStorage::new();
+
+        {
+            let txn = storage.begin_transaction().await.unwrap();
+            txn.put(Bytes::from("k1"), Bytes::from("v1")).unwrap();
+            // drop without commit
+        }
+
+        let result = storage.get(Bytes::from("k1")).await.unwrap();
+        assert!(result.is_none(), "dropped transaction should not persist writes");
+    }
+
+    #[tokio::test]
+    async fn should_delete_within_transaction() {
+        let storage = InMemoryStorage::new();
+        storage
+            .put(vec![Record::new(Bytes::from("k1"), Bytes::from("v1")).into()])
+            .await
+            .unwrap();
+
+        let txn = storage.begin_transaction().await.unwrap();
+        txn.delete(Bytes::from("k1")).unwrap();
+
+        // Read-your-own-deletes
+        let result = txn.get(Bytes::from("k1")).await.unwrap();
+        assert!(result.is_none());
+
+        txn.commit().await.unwrap();
+
+        let result = storage.get(Bytes::from("k1")).await.unwrap();
+        assert!(result.is_none(), "delete should persist after commit");
+    }
+
+    #[tokio::test]
+    async fn should_scan_within_transaction() {
+        let storage = InMemoryStorage::new();
+        storage
+            .put(vec![
+                Record::new(Bytes::from("a"), Bytes::from("1")).into(),
+                Record::new(Bytes::from("b"), Bytes::from("2")).into(),
+            ])
+            .await
+            .unwrap();
+
+        let txn = storage.begin_transaction().await.unwrap();
+        txn.put(Bytes::from("c"), Bytes::from("3")).unwrap();
+        txn.delete(Bytes::from("a")).unwrap();
+
+        let records = txn.scan(BytesRange::unbounded()).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].key, Bytes::from("b"));
+        assert_eq!(records[1].key, Bytes::from("c"));
+
+        txn.commit().await.unwrap();
     }
 }

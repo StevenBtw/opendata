@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use slatedb::config::ScanOptions;
 use slatedb::{
-    Db, DbIterator, DbReader, DbSnapshot, MergeOperator as SlateDbMergeOperator,
-    MergeOperatorError, WriteBatch, config::WriteOptions as SlateDbWriteOptions,
+    Db, DbIterator, DbReader, DbSnapshot, DbTransaction, ErrorKind, IsolationLevel,
+    MergeOperator as SlateDbMergeOperator, MergeOperatorError, WriteBatch,
+    config::WriteOptions as SlateDbWriteOptions,
 };
 use tokio::sync::watch;
 
@@ -232,6 +233,72 @@ impl StorageRead for SlateDbStorageSnapshot {
 #[async_trait]
 impl StorageSnapshot for SlateDbStorageSnapshot {}
 
+/// SlateDB transaction wrapper that implements StorageTransaction.
+///
+/// Provides snapshot-isolated reads and buffered writes that are committed
+/// atomically. Write-write conflicts are detected at commit time.
+pub struct SlateDbTransaction {
+    txn: DbTransaction,
+}
+
+#[async_trait]
+impl StorageRead for SlateDbTransaction {
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn get(&self, key: Bytes) -> StorageResult<Option<Record>> {
+        let value = self
+            .txn
+            .get(&key)
+            .await
+            .map_err(map_txn_error)?;
+
+        match value {
+            Some(v) => Ok(Some(Record::new(key, v))),
+            None => Ok(None),
+        }
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn scan_iter(
+        &self,
+        range: BytesRange,
+    ) -> StorageResult<Box<dyn StorageIterator + Send + 'static>> {
+        let iter = self
+            .txn
+            .scan_with_options(range, &default_scan_options())
+            .await
+            .map_err(map_txn_error)?;
+        Ok(Box::new(SlateDbIterator { iter }))
+    }
+}
+
+#[async_trait]
+impl super::StorageTransaction for SlateDbTransaction {
+    fn put(&self, key: Bytes, value: Bytes) -> StorageResult<()> {
+        self.txn.put(key, value).map_err(map_txn_error)
+    }
+
+    fn delete(&self, key: Bytes) -> StorageResult<()> {
+        self.txn.delete(key).map_err(map_txn_error)
+    }
+
+    fn merge(&self, key: Bytes, value: Bytes) -> StorageResult<()> {
+        self.txn.merge(key, value).map_err(map_txn_error)
+    }
+
+    async fn commit(self: Box<Self>) -> StorageResult<()> {
+        self.txn.commit().await.map_err(map_txn_error).map(|_| ())
+    }
+}
+
+/// Maps SlateDB errors to StorageError, translating transaction conflicts.
+fn map_txn_error(e: slatedb::Error) -> StorageError {
+    if matches!(e.kind(), ErrorKind::Transaction) {
+        StorageError::TransactionConflict
+    } else {
+        StorageError::from_storage(e)
+    }
+}
+
 #[async_trait]
 impl Storage for SlateDbStorage {
     async fn apply_with_options(
@@ -340,6 +407,17 @@ impl Storage for SlateDbStorage {
         self.durable_bridge_abort.abort();
         self.db.close().await.map_err(StorageError::from_storage)?;
         Ok(())
+    }
+
+    async fn begin_transaction(
+        &self,
+    ) -> StorageResult<Box<dyn super::StorageTransaction + Send>> {
+        let txn = self
+            .db
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .map_err(StorageError::from_storage)?;
+        Ok(Box::new(SlateDbTransaction { txn }))
     }
 
     #[cfg(feature = "metrics")]

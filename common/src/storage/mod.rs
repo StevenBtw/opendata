@@ -138,6 +138,8 @@ pub enum StorageError {
     Storage(String),
     /// Internal errors
     Internal(String),
+    /// Transaction conflict (write-write or read-write conflict detected at commit)
+    TransactionConflict,
 }
 
 impl std::error::Error for StorageError {}
@@ -147,6 +149,7 @@ impl std::fmt::Display for StorageError {
         match self {
             StorageError::Storage(msg) => write!(f, "Storage error: {}", msg),
             StorageError::Internal(msg) => write!(f, "Internal error: {}", msg),
+            StorageError::TransactionConflict => write!(f, "Transaction conflict"),
         }
     }
 }
@@ -244,6 +247,33 @@ pub trait StorageRead: Send + Sync {
 /// writes to the underlying storage.
 #[async_trait]
 pub trait StorageSnapshot: StorageRead {}
+
+/// A read-write transaction with snapshot isolation.
+///
+/// Reads see a consistent snapshot from when the transaction began.
+/// Writes are buffered until [`commit()`](StorageTransaction::commit).
+/// On commit, the storage engine detects write-write conflicts and returns
+/// [`StorageError::TransactionConflict`] if another transaction committed
+/// conflicting writes after this transaction's snapshot.
+///
+/// Dropping without calling `commit()` is an implicit rollback.
+#[async_trait]
+pub trait StorageTransaction: StorageRead {
+    /// Buffers a put operation within this transaction.
+    fn put(&self, key: Bytes, value: Bytes) -> StorageResult<()>;
+
+    /// Buffers a delete operation within this transaction.
+    fn delete(&self, key: Bytes) -> StorageResult<()>;
+
+    /// Buffers a merge operation within this transaction.
+    fn merge(&self, key: Bytes, value: Bytes) -> StorageResult<()>;
+
+    /// Commits all buffered writes atomically.
+    ///
+    /// Returns [`StorageError::TransactionConflict`] if another transaction
+    /// committed conflicting writes after this transaction's snapshot.
+    async fn commit(self: Box<Self>) -> StorageResult<()>;
+}
 
 /// The storage type encapsulates access to the underlying storage (e.g. SlateDB).
 #[async_trait]
@@ -365,6 +395,19 @@ pub trait Storage: StorageRead {
     /// `DbStatus::durable_seq`. For in-memory storage, writes are immediately
     /// "durable" so the watermark matches the latest written seqnum.
     fn subscribe_durable(&self) -> tokio::sync::watch::Receiver<u64>;
+
+    /// Begins a new transaction with snapshot isolation.
+    ///
+    /// Returns a [`StorageTransaction`] that provides a consistent read view
+    /// and buffers writes until commit. The default implementation returns
+    /// an error for backends that do not support transactions.
+    async fn begin_transaction(
+        &self,
+    ) -> StorageResult<Box<dyn StorageTransaction + Send>> {
+        Err(StorageError::Internal(
+            "transactions not supported by this storage backend".to_string(),
+        ))
+    }
 
     /// Registers storage engine metrics into the given Prometheus registry.
     ///
