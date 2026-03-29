@@ -99,9 +99,9 @@ default and mandatory interface.
 | Crate          | Version | Role                                                                  |
 |----------------|---------|-----------------------------------------------------------------------|
 | `parking_lot`  | 0.12    | Faster RwLock/Mutex for catalog cache and sequence allocators         |
-| `hashbrown`    | 0.14    | HashMap variant used by Grafeo types                                  |
+| `hashbrown`    | 0.16    | HashMap variant used by Grafeo types                                  |
 | `arcstr`       | 1.2     | Atomic reference-counted strings (used for label/type/property names) |
-| `smallvec`     | 1.13    | Stack-allocated vectors (used for node label lists)                   |
+| `smallvec`     | 1.15    | Stack-allocated vectors (used for node label lists)                   |
 
 ### Precedent
 
@@ -186,6 +186,14 @@ pruning, and statistics for the cost-based optimizer.
 `GraphStoreMut` extends `GraphStore` with mutations: create/delete nodes and edges, set/remove
 properties, add/remove labels, and batch edge creation.
 
+Both traits include versioned variants of most methods (e.g., `get_node_versioned`,
+`create_node_versioned`) and temporal visibility methods (`is_node_visible_at_epoch`,
+`filter_visible_node_ids`, `get_node_history`). The SlateDB adapter stubs these to delegate to
+their non-versioned counterparts, returning the current state regardless of the requested epoch.
+Catalog introspection methods (`all_labels`, `all_edge_types`, `all_property_keys`) are served
+directly from the in-memory catalog cache. These stubs will be activated when time-travel query
+support is added (see Future Considerations).
+
 #### Core Types
 
 The following Grafeo types are serialized to/from SlateDB records:
@@ -261,8 +269,9 @@ discriminant in the lower 4 bits.
 ### Common Encodings
 
 Key encodings use the primitives defined in [RFC 0004](../../rfcs/0004-common-encodings.md):
-`TerminatedBytes` for variable-length keys, sortable `i64`/`f64` for ordered numeric keys
-(sign-bit flip, big-endian). Value fields are little-endian.
+`TerminatedBytes` for variable-length keys and `FixedElementArray<T>` for fixed-width arrays.
+Sortable `i64`/`f64` encodings (sign-bit flip, big-endian) use `common::serde::sortable`
+(`encode_i64_sortable`, `encode_f64_sortable`). Value fields are little-endian.
 
 ### Record Type Reference
 
@@ -566,9 +575,9 @@ scan are the same type.
 
 ```text
 Bool    → u8 (0 or 1)                               (1 byte)
-Int64   → sign-bit flip, big-endian per RFC 0004     (8 bytes)
-Float64 → sign-bit flip, big-endian per RFC 0004     (8 bytes)
-String  → TerminatedBytes per RFC 0004               (variable)
+Int64   → sign-bit flip, big-endian (common::serde::sortable)  (8 bytes)
+Float64 → sign-bit flip, big-endian (common::serde::sortable)  (8 bytes)
+String  → TerminatedBytes per RFC 0004                         (variable)
 ```
 
 Only these four types support sortable encoding; other `Value` types are not indexed.
@@ -863,6 +872,11 @@ to the record type described above (e.g., `get_node` is a direct `get` on `NodeR
 `edges_from` prefix scans `ForwardAdj`/`BackwardAdj`; `nodes_by_label` prefix scans
 `LabelIndex`). `node_ids()` is the only expensive operation (full `NodeRecord` scan, O(N)); the
 query engine avoids it when label or property predicates are available.
+
+**Error handling:** Grafeo's `GraphStore` trait returns `Option<Node>` / `Option<Edge>` for
+lookups, with no way to signal storage errors. The adapter maps storage errors to `None`,
+making a transient I/O failure indistinguishable from a missing entity. Storage errors are
+logged at `warn` level before returning `None` to aid debugging.
 
 ## Alternatives
 

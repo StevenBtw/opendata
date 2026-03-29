@@ -107,6 +107,8 @@ impl SlateGraphStore {
                 Ok(val) => return Ok(val),
                 Err(StorageError::TransactionConflict) if attempt < MAX_RETRIES - 1 => {
                     tracing::debug!("transaction conflict, retrying (attempt {})", attempt + 1);
+                    // Small jitter to avoid retry storms under contention (RFC 0006).
+                    std::thread::sleep(std::time::Duration::from_millis(1 + attempt as u64 * 2));
                     continue;
                 }
                 Err(e) => return Err(Error::from(e)),

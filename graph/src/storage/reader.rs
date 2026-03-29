@@ -18,17 +18,26 @@ use crate::serde::values::{self, EdgeRecordValue, NodeRecordValue};
 impl GraphStore for SlateGraphStore {
     fn get_node(&self, id: NodeId) -> Option<Node> {
         let key = NodeRecordKey { node_id: id.0 }.encode();
-        self.exec(async { self.storage.get(key).await })
-            .ok()?
-            .as_ref()?;
-        self.build_node(id).ok().flatten()
+        match self.exec(async { self.storage.get(key).await }) {
+            Ok(Some(_)) => self.build_node(id).ok().flatten(),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(node_id = id.0, error = %e, "storage error in get_node");
+                None
+            }
+        }
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
         let key = EdgeRecordKey { edge_id: id.0 }.encode();
-        let record = self
-            .exec(async { self.storage.get(key).await })
-            .ok()??;
+        let record = match self.exec(async { self.storage.get(key).await }) {
+            Ok(Some(r)) => r,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(edge_id = id.0, error = %e, "storage error in get_edge");
+                return None;
+            }
+        };
         let val = EdgeRecordValue::decode(&record.value).ok()?;
         self.build_edge(id, &val).ok()
     }

@@ -628,6 +628,78 @@ mod tests {
         assert_eq!(encoded.len(), MetadataKey::SIZE);
     }
 
+    // --- Byte-order validation tests ---
+    // Guard against regressions: assert exact byte patterns in encoded keys
+    // to ensure big-endian encoding is preserved (put_u64/put_u32 are BE).
+
+    #[test]
+    fn should_encode_node_record_key_big_endian() {
+        let key = NodeRecordKey {
+            node_id: 0x0102030405060708,
+        };
+        let encoded = key.encode();
+        assert_eq!(
+            &encoded[3..11],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            "node_id must be big-endian"
+        );
+    }
+
+    #[test]
+    fn should_encode_node_property_key_big_endian() {
+        let key = NodePropertyKey {
+            node_id: 0x0102030405060708,
+            prop_key_id: 0x0A0B0C0D,
+        };
+        let encoded = key.encode();
+        assert_eq!(
+            &encoded[3..11],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            "node_id must be big-endian"
+        );
+        assert_eq!(
+            &encoded[11..15],
+            &[0x0A, 0x0B, 0x0C, 0x0D],
+            "prop_key_id must be big-endian"
+        );
+    }
+
+    #[test]
+    fn should_encode_forward_adj_key_big_endian() {
+        let key = ForwardAdjKey {
+            src: 0x0102030405060708,
+            edge_type_id: 0x0A0B0C0D,
+            dst: 0x1112131415161718,
+            edge_id: 0x2122232425262728,
+        };
+        let encoded = key.encode();
+        assert_eq!(&encoded[3..11], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], "src BE");
+        assert_eq!(&encoded[11..15], &[0x0A, 0x0B, 0x0C, 0x0D], "edge_type_id BE");
+        assert_eq!(&encoded[15..23], &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18], "dst BE");
+        assert_eq!(&encoded[23..31], &[0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28], "edge_id BE");
+    }
+
+    #[test]
+    fn should_encode_label_index_key_big_endian() {
+        let key = LabelIndexKey {
+            label_id: 0x0A0B0C0D,
+            node_id: 0x0102030405060708,
+        };
+        let encoded = key.encode();
+        assert_eq!(&encoded[3..7], &[0x0A, 0x0B, 0x0C, 0x0D], "label_id BE");
+        assert_eq!(&encoded[7..15], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], "node_id BE");
+    }
+
+    #[test]
+    fn should_encode_catalog_by_id_key_big_endian() {
+        let key = CatalogByIdKey {
+            kind: CatalogKind::LabelById,
+            id: 0x0A0B0C0D,
+        };
+        let encoded = key.encode();
+        assert_eq!(&encoded[3..7], &[0x0A, 0x0B, 0x0C, 0x0D], "id BE");
+    }
+
     // --- Ordering tests ---
 
     #[test]

@@ -132,10 +132,72 @@ impl GraphStoreMut for SlateGraphStore {
     }
 
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
-        edges
-            .iter()
-            .map(|(src, dst, edge_type)| self.create_edge(*src, *dst, edge_type))
-            .collect()
+        if edges.is_empty() {
+            return Vec::new();
+        }
+
+        let mut ops: Vec<RecordOp> = Vec::new();
+        let mut edge_ids = Vec::with_capacity(edges.len());
+
+        {
+            let mut seq = self.edge_seq.lock().unwrap();
+            let mut catalog = self.catalog.write();
+
+            for (src, dst, edge_type) in edges {
+                let (edge_id, seq_record) = seq.allocate_one();
+                if let Some(record) = seq_record {
+                    ops.push(RecordOp::Put(PutRecordOp::from(record)));
+                }
+
+                let (type_id, catalog_ops) = catalog.get_or_create_edge_type(edge_type);
+                ops.extend(catalog_ops);
+
+                let edge_val = EdgeRecordValue {
+                    src: src.0,
+                    dst: dst.0,
+                    type_id,
+                    prop_count: 0,
+                };
+                ops.push(put_record(
+                    EdgeRecordKey { edge_id }.encode(),
+                    edge_val.encode(),
+                ));
+
+                ops.push(put_record(
+                    ForwardAdjKey {
+                        src: src.0,
+                        edge_type_id: type_id,
+                        dst: dst.0,
+                        edge_id,
+                    }
+                    .encode(),
+                    Bytes::new(),
+                ));
+
+                ops.push(put_record(
+                    BackwardAdjKey {
+                        dst: dst.0,
+                        edge_type_id: type_id,
+                        src: src.0,
+                        edge_id,
+                    }
+                    .encode(),
+                    Bytes::new(),
+                ));
+
+                edge_ids.push(EdgeId(edge_id));
+            }
+        }
+
+        ops.push(counter_merge(
+            MetadataSubType::EdgeCount,
+            edges.len() as i64,
+        ));
+
+        let _ = self.exec(async { self.storage.apply(ops).await });
+        self.edge_count
+            .fetch_add(edges.len() as i64, Ordering::Relaxed);
+        edge_ids
     }
 
     fn delete_node(&self, id: NodeId) -> bool {
@@ -147,13 +209,63 @@ impl GraphStoreMut for SlateGraphStore {
                 // Check existence
                 let record = txn.get(node_key.clone()).await?;
                 let Some(record) = record else {
-                    return Ok(false);
+                    return Ok((false, 0i64));
                 };
 
                 // Delete the node record
                 txn.delete(node_key)?;
 
-                // Delete properties and their PropertyIndex entries
+                // Clean up any remaining edges (crash safety: if delete_node_edges
+                // was interrupted, this ensures no orphaned adjacency entries remain).
+                let mut edges_deleted: i64 = 0;
+
+                let fwd_records = txn.scan(ForwardAdjKey::src_prefix(id.0)).await?;
+                for r in &fwd_records {
+                    if let Ok(fwd) = ForwardAdjKey::decode(&r.key) {
+                        // Delete edge record
+                        txn.delete(EdgeRecordKey { edge_id: fwd.edge_id }.encode())?;
+                        // Delete backward adjacency
+                        let bwd = BackwardAdjKey {
+                            dst: fwd.dst,
+                            edge_type_id: fwd.edge_type_id,
+                            src: id.0,
+                            edge_id: fwd.edge_id,
+                        };
+                        txn.delete(bwd.encode())?;
+                        // Delete edge properties
+                        let eprops = txn.scan(EdgePropertyKey::edge_prefix(fwd.edge_id)).await?;
+                        for ep in &eprops {
+                            txn.delete(ep.key.clone())?;
+                        }
+                        edges_deleted += 1;
+                    }
+                    txn.delete(r.key.clone())?;
+                }
+
+                let bwd_records = txn.scan(BackwardAdjKey::dst_prefix(id.0)).await?;
+                for r in &bwd_records {
+                    if let Ok(bwd) = BackwardAdjKey::decode(&r.key) {
+                        // Delete edge record
+                        txn.delete(EdgeRecordKey { edge_id: bwd.edge_id }.encode())?;
+                        // Delete forward adjacency
+                        let fwd = ForwardAdjKey {
+                            src: bwd.src,
+                            edge_type_id: bwd.edge_type_id,
+                            dst: id.0,
+                            edge_id: bwd.edge_id,
+                        };
+                        txn.delete(fwd.encode())?;
+                        // Delete edge properties
+                        let eprops = txn.scan(EdgePropertyKey::edge_prefix(bwd.edge_id)).await?;
+                        for ep in &eprops {
+                            txn.delete(ep.key.clone())?;
+                        }
+                        edges_deleted += 1;
+                    }
+                    txn.delete(r.key.clone())?;
+                }
+
+                // Delete node properties and their PropertyIndex entries
                 let prop_records = txn
                     .scan(NodePropertyKey::node_prefix(id.0))
                     .await?;
@@ -184,7 +296,16 @@ impl GraphStoreMut for SlateGraphStore {
                     }
                 }
 
-                // Counter decrement
+                // Counter decrements
+                if edges_deleted > 0 {
+                    txn.merge(
+                        MetadataKey {
+                            sub_type: MetadataSubType::EdgeCount,
+                        }
+                        .encode(),
+                        super::encode_i64_le(-edges_deleted),
+                    )?;
+                }
                 txn.merge(
                     MetadataKey {
                         sub_type: MetadataSubType::NodeCount,
@@ -194,13 +315,16 @@ impl GraphStoreMut for SlateGraphStore {
                 )?;
 
                 txn.commit().await?;
-                Ok(true)
+                Ok((true, edges_deleted))
             })
         });
 
         match result {
-            Ok(true) => {
+            Ok((true, edges_deleted)) => {
                 self.node_count.fetch_sub(1, Ordering::Relaxed);
+                if edges_deleted > 0 {
+                    self.edge_count.fetch_sub(edges_deleted, Ordering::Relaxed);
+                }
                 true
             }
             _ => false,

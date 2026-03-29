@@ -1109,3 +1109,35 @@ async fn set_property_overwrite_updates_index() {
         vec![id]
     );
 }
+
+// ─── 3.12 Atomic edge cascade in delete_node ──────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_node_atomically_cleans_edges() {
+    let db = setup().await;
+    let s = store(&db);
+
+    let a = s.create_node(&[]);
+    let b = s.create_node(&[]);
+    let c = s.create_node(&[]);
+
+    let e1 = s.create_edge(a, b, "X");
+    let e2 = s.create_edge(c, a, "Y");
+    s.set_edge_property(e1, "weight", Value::Float64(1.0));
+
+    assert_eq!(s.edge_count(), 2);
+
+    // Delete node WITHOUT calling delete_node_edges first —
+    // delete_node itself should clean up edges atomically.
+    s.delete_node(a);
+
+    assert!(s.get_node(a).is_none(), "node should be deleted");
+    assert!(s.get_edge(e1).is_none(), "outgoing edge should be deleted");
+    assert!(s.get_edge(e2).is_none(), "incoming edge should be deleted");
+    assert_eq!(s.out_degree(a), 0);
+    assert_eq!(s.in_degree(a), 0);
+    assert_eq!(s.in_degree(b), 0, "b should have no incoming edges");
+    assert_eq!(s.out_degree(c), 0, "c should have no outgoing edges");
+    assert_eq!(s.edge_count(), 0, "both edges should be counted as deleted");
+    assert_eq!(s.node_count(), 2, "b and c should remain");
+}

@@ -130,6 +130,10 @@ impl Catalog {
     }
 }
 
+/// Maximum allowed length for catalog names (labels, edge types, property keys).
+/// Names beyond this limit are truncated to prevent unbounded key growth.
+const MAX_NAME_LEN: usize = 1024;
+
 /// Gets or creates an entry in a BiMap, returning (id, records_to_persist).
 fn get_or_create(
     bimap: &mut BiMap,
@@ -137,6 +141,21 @@ fn get_or_create(
     by_name_kind: CatalogKind,
     name: &str,
 ) -> (u32, Vec<common::storage::RecordOp>) {
+    if name.is_empty() {
+        tracing::warn!("empty catalog name for {:?}", by_id_kind);
+    }
+    let name = if name.len() > MAX_NAME_LEN {
+        tracing::warn!(
+            len = name.len(),
+            max = MAX_NAME_LEN,
+            "catalog name truncated for {:?}",
+            by_id_kind,
+        );
+        &name[..MAX_NAME_LEN]
+    } else {
+        name
+    };
+
     if let Some(id) = bimap.get_id(name) {
         return (id, Vec::new());
     }
