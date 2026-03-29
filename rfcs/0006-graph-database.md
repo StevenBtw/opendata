@@ -32,8 +32,9 @@ The storage design must support:
    operation. Adjacency must be stored in a layout that enables fast, direction-aware traversal
    without loading unrelated data.
 
-2. **Point lookups**: Retrieving a node or edge by ID must be O(1) via a direct key lookup. The
-   query engine issues point lookups during pattern matching and result materialization.
+2. **Point lookups**: Retrieving a node or edge by ID must require a single point lookup via a
+   direct key. The query engine issues point lookups during pattern matching and result
+   materialization.
 
 3. **Label and property indexing**: GQL queries filter nodes by label (`MATCH (n:Person)`) and by
    property values (`WHERE n.age > 30`). Without indexes, these require full scans.
@@ -79,7 +80,7 @@ The graph engine introduces the following external crate dependencies:
 | Crate            | Version | Role                                                                                                                                     |
 |------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `grafeo-core`    | 0.5.28  | Graph storage traits (`GraphStore`, `GraphStoreMut`), core types (`Node`, `Edge`, `NodeId`, `EdgeId`, `Value`, `PropertyKey`)            |
-| `grafeo-common`  | 0.5.28  | Shared primitives (`NodeId`, `EdgeId`, `EpochId`, `Value` enum)                                                                          |
+| `grafeo-common`  | 0.5.28  | Shared primitives (`NodeId`, `EdgeId`, `Value` enum); also provides `EpochId` used by the optional `temporal` feature                    |
 | `grafeo-engine`  | 0.5.28  | Query engine: GQL parser, cost-based optimizer, push-based vectorized executor. GQL is the primary query interface and is always enabled |
 
 Grafeo is published on crates.io. All three crates are required dependencies. The graph database
@@ -204,7 +205,9 @@ Value variants:
 ├─ List(Arc<[Value]>)           tag 0x0B
 ├─ Map(Arc<BTreeMap<...>>)      tag 0x0C
 ├─ Vector(Arc<[f32]>)           tag 0x0D
-└─ Path { nodes, edges }        tag 0x0E
+├─ Path { nodes, edges }        tag 0x0E
+├─ GCounter(BTreeMap<…>)        tag 0x0F
+└─ OnCounter(BTreeMap<…>)       tag 0x10
 ```
 
 ### Identifiers: External and Internal
@@ -293,20 +296,23 @@ Total: 11 bytes.
 ┌────────────────────────────────────────────────────────┐
 │                    NodeRecordValue                     │
 ├────────────────────────────────────────────────────────┤
-│  label_count: u16 (LE)                                 │
-│  label_ids:   [u32 LE; label_count]                    │
+│  label_ids: FixedElementArray<u32 LE>                  │
 └────────────────────────────────────────────────────────┘
 ```
+
+Encoded as a `FixedElementArray<u32>` per
+[RFC 0004](../../rfcs/0004-common-encodings.md#fixedelementarrayt): the label count is derived
+from `value_length / 4`, so no explicit count prefix is needed.
 
 **Structure:**
 
 - `label_ids` are catalog-assigned `LabelId` values. Label names are resolved via the catalog.
-- A node with no labels is valid (`label_count = 0`).
+- A node with no labels is valid (empty value).
 - If the key does not exist in SlateDB, the node does not exist.
 
 **Point Lookup:**
 
-To retrieve a node by ID: direct `get()` on the encoded key. O(1).
+To retrieve a node by ID: single `get()` on the encoded key.
 
 ### `EdgeRecord` (`0x20`)
 
@@ -345,7 +351,9 @@ Total: 22 bytes.
 
 - `src_node_id` and `dst_node_id` are the endpoints of the directed edge.
 - `edge_type_id` is a catalog-assigned `EdgeTypeId`. The type name is resolved via the catalog.
-- Point lookup is a direct `get()` on the encoded key. O(1).
+- `prop_count` tracks the number of `EdgeProperty` records for this edge. Currently written as `0`;
+  reserved for future use by the query optimizer for property existence checks without scanning.
+- Point lookup is a single `get()` on the encoded key.
 
 ### `NodeProperty` (`0x30`)
 
@@ -707,9 +715,12 @@ Follows the same allocation pattern as the common crate's `SequenceAllocator`.
 ### Value Serialization
 
 Property values (`NodeProperty` / `EdgeProperty` values) are serialized using Grafeo's native
-`Value::serialize()` and deserialized with `Value::deserialize()`. This delegates the wire format
-entirely to `grafeo-common`, ensuring that the storage layer is always compatible with the query
-engine's type system without maintaining a separate encoding.
+[`Value::serialize()` / `Value::deserialize()`](https://github.com/GrafeoDB/grafeo/blob/main/crates/grafeo-common/src/value/serde.rs).
+The format is a one-byte type tag followed by the payload; the tag values match the table in the
+"Core Types" section above. This delegates the wire format entirely to `grafeo-common`, ensuring
+that the storage layer is always compatible with the query engine's type system without maintaining
+a separate encoding. The format is not yet stable across Grafeo major versions; the storage layer
+pins a specific Grafeo version and any breaking format change would require a key version bump.
 
 The `SortableValue` encoding used in `PropertyIndex` keys (see PropertyIndex section) is a
 separate, sort-preserving encoding distinct from `Value::serialize()`. Only Bool, Int64, Float64,
@@ -732,8 +743,9 @@ The adapter uses two patterns depending on the operation type:
 2. **Read-then-write operations** (`delete_node`, `delete_edge`, `add_label`, `remove_label`,
    `remove_*_property`): Use `StorageTransaction` for snapshot-isolated atomicity. The operation
    begins a transaction, reads the current state within that transaction's snapshot, buffers
-   writes, and commits. This prevents TOCTOU races (e.g., reading a node's labels, then writing
-   updated labels, while another writer modifies the same node).
+   writes, and commits. This prevents [time-of-check to time-of-use](https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use)
+   (TOCTOU) races; for example, reading a node's labels then writing updated labels while another
+   writer modifies the same node.
 
 **Conflict Handling:**
 
@@ -753,7 +765,7 @@ This was rejected for several reasons:
   epoch and stamp their records with duplicate epoch values.
 - **Complexity**: Version chains required scanning and filtering for every point lookup (O(v)
   where v is the number of versions), garbage collection of old versions, and special handling
-  of deletion markers. Without these, point lookups are O(1) direct `get()` calls.
+  of deletion markers. Without these, each point lookup is a single `get()` call.
 - **Forward-compatible**: If time-travel queries are needed in the future, the key layout can
   be extended with an epoch suffix without changing the record tag allocation.
 
@@ -802,11 +814,18 @@ StorageTransaction:
   GET  [0x05, 0x01, 0x10, 42]  → NodeRecordValue { labels: [0, 1] }  (if absent → return false)
   DEL  [0x05, 0x01, 0x10, 42]
   SCAN [0x05, 0x01, 0x30, 42, ...]  → delete all NodeProperty records
+  DEL  [0x05, 0x01, 0x80, ...]      → delete matching PropertyIndex entries for each property
   DEL  [0x05, 0x01, 0x70, LabelId(0), 42]
   DEL  [0x05, 0x01, 0x70, LabelId(1), 42]
   MERGE [0x05, 0x01, 0xE0, 0x00]  → -1  (NodeCount)
   COMMIT
 ```
+
+Edge cascade is handled separately: Grafeo's engine calls `delete_node_edges` before
+`delete_node`, which scans ForwardAdj and BackwardAdj to find connected edges and deletes
+each via `delete_edge` (removing the EdgeRecord, both adjacency entries, edge properties
+and the EdgeCount merge). This keeps the storage adapter's `delete_node` focused on the node
+itself while the engine controls cascade semantics.
 
 ### Read Path: Assembling a Full Node
 
@@ -901,7 +920,7 @@ Value: { flags: DELETED, label_ids: [] }
 2. **Race condition**: The epoch counter (read-increment-write) was not protected by a transaction,
    allowing two concurrent writers to use the same epoch.
 3. **Read amplification**: Every point lookup required a prefix scan over the version chain and
-   filtering by epoch, instead of a single O(1) `get()`.
+   filtering by epoch, instead of a single `get()`.
 4. **Garbage collection burden**: Old versions accumulated in the LSM tree and required a
    background GC process (not yet designed) to reclaim space.
 
@@ -938,8 +957,10 @@ Future RFCs will address:
 - **Compaction policies**: Policies for cleaning up tombstoned adjacency/index entries.
 - **Write coordination**: Integration with the cross-project write coordination RFC for
   multi-writer scenarios.
-- **Time-travel queries**: If needed, the key layout can be extended with an epoch suffix to
-  enable versioned reads. The current design is forward-compatible with this extension.
+- **Time-travel queries**: Grafeo 0.5.24+ ships a temporal property versioning API
+  (`get_node_property_at_epoch`, `execute_at_epoch`). The key layout is forward-compatible
+  with an epoch suffix extension; this is deferred until production use cases justify the
+  added key size and GC complexity.
 
 ## References
 
@@ -972,4 +993,6 @@ Future RFCs will address:
 |            | Updated to Grafeo v0.5.22. Addressed reviewer feedback from cadonna and apurvam.  |
 | 2026-03-29 | Adopted 3-byte key prefix (subsystem `0x05`, version, tag) per RFC 0001 update    |
 |            | (PR #326). Updated all key layouts, byte sizes, and prefix examples.              |
-|            | Updated to Grafeo v0.5.28.                                                        |
+|            | Updated to Grafeo v0.5.28. NodeRecordValue uses `FixedElementArray<u32>` per      |
+|            | RFC 0004. Added Value format link, GCounter/OnCounter variants, PropertyIndex     |
+|            | cleanup in delete_node, edge cascade semantics. Addressed reviewer feedback.      |
