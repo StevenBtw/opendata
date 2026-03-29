@@ -12,9 +12,9 @@ pub(crate) const KEY_VERSION: u8 = 0x01;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum RecordType {
-    /// Node entity record with MVCC epoch.
+    /// Node entity record.
     NodeRecord = 1, // tag 0x10
-    /// Edge entity record with MVCC epoch.
+    /// Edge entity record.
     EdgeRecord = 2, // tag 0x20
     /// Node property (key -> value).
     NodeProperty = 3, // tag 0x30

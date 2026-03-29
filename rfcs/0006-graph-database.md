@@ -732,12 +732,13 @@ Follows the same allocation pattern as the common crate's `SequenceAllocator`.
 ### Value Serialization
 
 Property values (`NodeProperty` / `EdgeProperty` values) are serialized using Grafeo's native
-[`Value::serialize()` / `Value::deserialize()`](https://github.com/GrafeoDB/grafeo/blob/main/crates/grafeo-common/src/value/serde.rs).
-The format is a one-byte type tag followed by the payload; the tag values match the table in the
-"Core Types" section above. This delegates the wire format entirely to `grafeo-common`, ensuring
-that the storage layer is always compatible with the query engine's type system without maintaining
-a separate encoding. The format is not yet stable across Grafeo major versions; the storage layer
-pins a specific Grafeo version and any breaking format change would require a key version bump.
+[`Value::serialize()` / `Value::deserialize()`](https://github.com/GrafeoDB/grafeo/blob/main/crates/grafeo-common/src/types/value.rs).
+The implementation delegates to `bincode::serde::encode_to_vec(self, bincode::config::standard())`
+— the storage layer treats the serialized bytes as opaque. This delegates the wire format entirely
+to `grafeo-common`, ensuring that the storage layer is always compatible with the query engine's
+type system without maintaining a separate encoding. The format is not yet stable across Grafeo
+major versions; the storage layer pins a specific Grafeo version and any breaking format change
+would require a key version bump.
 
 The `SortableValue` encoding used in `PropertyIndex` keys (see PropertyIndex section) is a
 separate, sort-preserving encoding distinct from `Value::serialize()`. Only Bool, Int64, Float64,
@@ -839,19 +840,17 @@ StorageTransaction:
   COMMIT
 ```
 
-Edge cascade is handled separately: Grafeo's engine calls `delete_node_edges` before
-`delete_node`, which scans ForwardAdj and BackwardAdj to find connected edges and deletes
-each via `delete_edge` (removing the EdgeRecord, both adjacency entries, edge properties
-and the EdgeCount merge). This keeps the storage adapter's `delete_node` focused on the node
-itself while the engine controls cascade semantics.
+Edge cascade is handled within `delete_node` itself: the implementation scans ForwardAdj and
+BackwardAdj within the same `StorageTransaction`, deleting each connected edge's EdgeRecord,
+both adjacency entries, edge properties, and applying EdgeCount counter merges — all before
+committing. This makes node deletion fully atomic: the node, all connected edges, their
+properties, label index entries, property index entries, and counter adjustments are committed
+or rolled back as a single unit.
 
-**Crash safety:** The cascade is not atomic with node deletion. A crash between
-`delete_node_edges` and `delete_node` may leave the node intact with some edges already
-deleted, resulting in stale adjacency state (`edges_from` and degree functions would return
-incorrect results for affected nodes). On retry, `delete_node_edges` re-scans adjacency and
-deletes any remaining edges before proceeding, so the operation converges. A future
-improvement could combine both into a single `StorageTransaction` to eliminate the window
-entirely.
+A separate `delete_node_edges` method exists to satisfy Grafeo's `GraphStoreMut` trait contract
+(the engine may call it independently). If `delete_node_edges` was previously called — or
+partially completed before a crash — `delete_node` re-scans adjacency within its transaction
+and cleans up any remaining edges, making the operation convergent.
 
 ### Read Path: Assembling a Full Node
 
