@@ -1030,3 +1030,9 @@ Future RFCs will address:
 |            | Updated to Grafeo v0.5.28. NodeRecordValue uses `FixedElementArray<u32>` per      |
 |            | RFC 0004. Added Value format link, GCounter/OnCounter variants, PropertyIndex     |
 |            | cleanup in delete_node, edge cascade semantics. Addressed reviewer feedback.      |
+| 2026-03-29 | Post-review fixes: corrected sortable encoding attribution (was "per RFC 0004",   |
+|            | now references `common::serde::sortable`). Fixed dependency versions (hashbrown   |
+|            | 0.16, smallvec 1.15). Documented stubbed temporal/visibility trait methods and    |
+|            | error handling in read path. Implementation: atomic edge cascade in delete_node,  |
+|            | single-WriteBatch batch_create_edges, catalog name length validation, warn        |
+|            | logging for storage errors in get_node/get_edge, transaction retry jitter.        |
