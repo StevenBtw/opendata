@@ -347,16 +347,16 @@ profile, `cargo bench --bench layout_comparison`.
 
 **Observations:**
 
-- **Traversal is the dominant win for Merged.** Neighbor lookups at 1000 edges are 41×
+- **Traversal is the dominant win for Merged:** Neighbor lookups at 1000 edges are 41×
   faster in-memory because one packed value replaces a 1000-key prefix scan. On SlateDB
   the gap narrows (~15%) since the scan is I/O-bound, but Merged still wins.
-- **Property reads favor Merged** at 10 properties per node (1 get + decode vs 11 gets).
+- **Property reads favor Merged:** at 10 properties per node (1 get + decode vs 11 gets).
   The advantage grows with property count.
-- **Single-property writes favor Individual** — a direct `put()` avoids merge-operand
+- **Single-property writes favor Individual:** a direct `put()` avoids merge-operand
   encoding (0.9 µs vs 1.6 µs in-memory). On SlateDB the difference is within noise.
 - **Edge creation is comparable.** Merged adds merge-operand overhead (~30% in-memory)
   but on SlateDB both layouts are I/O-bound at ~5.5 ms for 100 edges.
-- **Bulk insert is layout-insensitive on SlateDB** — both complete 100 nodes + 300 edges
+- **Bulk insert is layout-insensitive on SlateDB:** both complete 100 nodes + 300 edges
   in ~22 ms, dominated by WAL/memtable costs.
 
 **Recommendation:** Use Individual for small graphs or write-heavy workloads with few
