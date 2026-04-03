@@ -31,9 +31,6 @@ pub struct Config {
     /// Graph model (LPG or RDF).
     #[serde(default)]
     pub graph_model: GraphModel,
-    /// Whether to maintain backward adjacency indexes (incoming edges).
-    #[serde(default = "default_true")]
-    pub backward_edges: bool,
     /// Storage layout strategy (Individual or Merged).
     #[serde(default)]
     pub storage_layout: StorageLayout,
@@ -44,12 +41,7 @@ impl Default for Config {
         Self {
             storage: StorageConfig::default(),
             graph_model: GraphModel::default(),
-            backward_edges: true,
             storage_layout: StorageLayout::default(),
         }
     }
-}
-
-fn default_true() -> bool {
-    true
 }

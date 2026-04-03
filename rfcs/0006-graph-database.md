@@ -144,8 +144,21 @@ operator. Writes issue merge operands (no read-before-write); reads decode a sin
 ### Standard Key Prefix
 
 All records use the standard 3-byte prefix per [RFC 0001](../../rfcs/0001-record-key-prefix.md):
-subsystem `0x05`, version `0x01`, record tag. Key fields are big-endian; value fields are
-little-endian. Sortable encodings (sign-bit flip) per [RFC 0004](../../rfcs/0004-common-encodings.md).
+subsystem `0x05` (to be registered in RFC 0001), version `0x01`, record tag. Key fields are
+big-endian; value fields are little-endian.
+
+**SortableValue encoding** is used for PropertyIndex keys to enable range scans. Only four
+`Value` variants support sortable key encoding:
+
+| Type | Encoding |
+|---|---|
+| Bool | `0x00` (false) / `0x01` (true) |
+| Int64 | 8 bytes big-endian with sign bit flipped (`value ^ 0x8000000000000000`) |
+| Float64 | 8 bytes big-endian; if negative flip all bits, else flip sign bit (`IEEE 754 total order`) |
+| String | `TerminatedBytes` encoding per [RFC 0004](../../rfcs/0004-common-encodings.md) |
+
+All other `Value` variants (List, Map, Bytes, etc.) are not sortable and are excluded from
+PropertyIndex. This encoding preserves lexicographic ordering in SlateDB's sorted key space.
 
 ### Record Type Reference
 
@@ -261,8 +274,8 @@ WriteBatch:
 ### Value Serialization
 
 Property values use Grafeo's `Value::serialize()` (bincode). The storage layer treats serialized
-bytes as opaque. `SortableValue` encoding (PropertyIndex keys) is separate: only Bool, Int64,
-Float64, and String support sortable encoding.
+bytes as opaque. `SortableValue` encoding for PropertyIndex keys is defined above in
+[Standard Key Prefix](#standard-key-prefix).
 
 ## Alternatives
 
@@ -375,3 +388,4 @@ for compaction and memory pressure.
 | 2026-03-30 | Bumped Grafeo to v0.5.30. Clarified Value variant indices are bincode-assigned. |
 | 2026-04-03 | Added Merged storage layout with merge-operator-based property packing and adjacency batching. Added keyspace analysis. Renamed SlateGraphStore to GraphStorage. Condensed RFC. |
 | 2026-04-03 | Added Appendix A with layout benchmark results. Added statistics granularity to Future Considerations. Clarified PropertyIndex staleness bounds. |
+| 2026-04-03 | Defined SortableValue encoding inline. Noted subsystem 0x05 registration in RFC 0001. Removed unused backward_edges config flag. |
