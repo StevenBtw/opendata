@@ -1,20 +1,20 @@
-//! GraphDb: the high-level database handle that wires SlateGraphStore into GrafeoDB.
+//! GraphDb: the high-level database handle that wires GraphStorage into GrafeoDB.
 
 use std::sync::Arc;
 
 use common::storage::Storage;
 use common::{StorageBuilder, StorageSemantics};
 
-use crate::storage::SlateGraphStore;
+use crate::storage::GraphStorage;
 use crate::storage::merge_operator::GraphMergeOperator;
 use crate::{Config, Result};
 
 /// High-level graph database backed by SlateDB.
 ///
-/// Wraps [`SlateGraphStore`] and, when the `grafeo-engine` feature is enabled,
+/// Wraps [`GraphStorage`] and, when the `grafeo-engine` feature is enabled,
 /// provides a `GrafeoDB` query engine for GQL/Cypher/etc.
 pub struct GraphDb {
-    store: Arc<SlateGraphStore>,
+    store: Arc<GraphStorage>,
     #[cfg(feature = "gql")]
     engine: grafeo_engine::GrafeoDB,
 }
@@ -44,7 +44,7 @@ impl GraphDb {
     /// responsible for providing a `GraphMergeOperator` via
     /// `StorageSemantics` when creating the storage.
     pub async fn open(storage: Arc<dyn Storage>, config: &Config) -> Result<Self> {
-        let store = Arc::new(SlateGraphStore::new(storage, config).await?);
+        let store = Arc::new(GraphStorage::new(storage, config).await?);
 
         #[cfg(feature = "gql")]
         let engine = {
@@ -60,7 +60,7 @@ impl GraphDb {
     }
 
     /// Returns a reference to the underlying store.
-    pub fn store(&self) -> &Arc<SlateGraphStore> {
+    pub fn store(&self) -> &Arc<GraphStorage> {
         &self.store
     }
 

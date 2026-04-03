@@ -9,7 +9,7 @@ use grafeo_core::graph::traits::{GraphStore, GraphStoreMut};
 
 use common::StorageConfig;
 use graph::db::GraphDb;
-use graph::{Config, SlateGraphStore};
+use graph::{Config, GraphStorage};
 
 fn setup_rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -26,7 +26,7 @@ fn setup_db(rt: &tokio::runtime::Runtime) -> Arc<GraphDb> {
     rt.block_on(async { Arc::new(GraphDb::open_with_config(&config).await.unwrap()) })
 }
 
-fn store(db: &GraphDb) -> &SlateGraphStore {
+fn store(db: &GraphDb) -> &GraphStorage {
     db.store()
 }
 

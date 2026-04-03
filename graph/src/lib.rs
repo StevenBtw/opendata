@@ -6,6 +6,6 @@ pub(crate) mod serde;
 pub mod server;
 pub mod storage;
 
-pub use config::{Config, GraphModel};
+pub use config::{Config, GraphModel, StorageLayout};
 pub use error::{Error, Result};
-pub use storage::SlateGraphStore;
+pub use storage::GraphStorage;

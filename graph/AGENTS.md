@@ -6,7 +6,7 @@ A labeled property graph database built on SlateDB, using Grafeo for GQL query e
 
 ### Key Concepts
 
-- **SlateGraphStore**: Implements Grafeo's `GraphStore`/`GraphStoreMut` traits over OpenData's `Storage` abstraction
+- **GraphStorage**: Implements Grafeo's `GraphStore`/`GraphStoreMut` traits over OpenData's `Storage` abstraction
 - **Sync-Async Bridge**: Grafeo traits are synchronous; `block_in_place` + `block_on` bridges to async SlateDB
 - **Catalog**: Bidirectional name/ID dictionaries for labels, edge types, and property keys
 - **Merge Operator**: Additive merge for metadata counters (node/edge counts); last-write-wins for everything else
@@ -30,7 +30,7 @@ A labeled property graph database built on SlateDB, using Grafeo for GQL query e
 ### Key Modules
 
 - `src/db.rs` - `GraphDb` high-level API (wraps Grafeo's `GrafeoDB`)
-- `src/storage/mod.rs` - `SlateGraphStore` struct, async loading, sync-async bridge
+- `src/storage/mod.rs` - `GraphStorage` struct, async loading, sync-async bridge
 - `src/storage/reader.rs` - `GraphStore` trait impl (reads, traversals, index lookups)
 - `src/storage/writer.rs` - `GraphStoreMut` trait impl (create/delete nodes/edges, properties, labels)
 - `src/storage/catalog.rs` - In-memory catalog with persistent backing
@@ -44,7 +44,7 @@ A labeled property graph database built on SlateDB, using Grafeo for GQL query e
 1. HTTP POST to `/query` with GQL string body
 2. `GraphDb::execute()` delegates to `GrafeoDB::execute()`
 3. Grafeo parser/planner/optimizer produces execution plan
-4. Executor calls `GraphStore` trait methods on `SlateGraphStore`
+4. Executor calls `GraphStore` trait methods on `GraphStorage`
 5. Each trait call uses `block_in_place` to run async `Storage::get/scan/apply`
 6. Results returned as `QueryResult { columns, rows }`
 

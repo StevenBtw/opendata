@@ -102,6 +102,194 @@ pub(crate) fn decode_value(data: &[u8]) -> Result<Value, crate::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// Merge operand constants and encoding (for StorageLayout::Merged)
+// ---------------------------------------------------------------------------
+
+/// Actions for property merge operands.
+pub(crate) const PROP_MERGE_SET: u8 = 0x01;
+pub(crate) const PROP_MERGE_REMOVE: u8 = 0x02;
+
+/// Actions for adjacency merge operands.
+pub(crate) const ADJ_MERGE_ADD: u8 = 0x01;
+pub(crate) const ADJ_MERGE_REMOVE: u8 = 0x02;
+
+/// Encodes a "set property" merge operand: [0x01][prop_key_id:u32 LE][value_bytes...]
+pub(crate) fn encode_prop_set_operand(prop_key_id: u32, value: &Value) -> Result<Bytes, crate::Error> {
+    let val_bytes = encode_value(value)?;
+    let mut buf = BytesMut::with_capacity(5 + val_bytes.len());
+    buf.put_u8(PROP_MERGE_SET);
+    buf.put_u32_le(prop_key_id);
+    buf.extend_from_slice(&val_bytes);
+    Ok(buf.freeze())
+}
+
+/// Encodes a "remove property" merge operand: [0x02][prop_key_id:u32 LE]
+pub(crate) fn encode_prop_remove_operand(prop_key_id: u32) -> Bytes {
+    let mut buf = BytesMut::with_capacity(5);
+    buf.put_u8(PROP_MERGE_REMOVE);
+    buf.put_u32_le(prop_key_id);
+    buf.freeze()
+}
+
+/// Encodes an "add edge" adjacency operand: [0x01][peer_id:u64 LE][edge_id:u64 LE]
+pub(crate) fn encode_adj_add_operand(peer_id: u64, edge_id: u64) -> Bytes {
+    let mut buf = BytesMut::with_capacity(17);
+    buf.put_u8(ADJ_MERGE_ADD);
+    buf.put_u64_le(peer_id);
+    buf.put_u64_le(edge_id);
+    buf.freeze()
+}
+
+/// Encodes a "remove edge" adjacency operand: [0x02][peer_id:u64 LE][edge_id:u64 LE]
+pub(crate) fn encode_adj_remove_operand(peer_id: u64, edge_id: u64) -> Bytes {
+    let mut buf = BytesMut::with_capacity(17);
+    buf.put_u8(ADJ_MERGE_REMOVE);
+    buf.put_u64_le(peer_id);
+    buf.put_u64_le(edge_id);
+    buf.freeze()
+}
+
+// ---------------------------------------------------------------------------
+// MergedPropsValue: [count:u32 LE]([prop_key_id:u32 LE][val_len:u32 LE][val_bytes])*
+// ---------------------------------------------------------------------------
+
+/// Packed properties value for the Merged storage layout.
+///
+/// Stores all properties of an entity in a single value, with each property
+/// identified by its catalog prop_key_id and raw serialized value bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct MergedPropsValue {
+    pub properties: Vec<(u32, Bytes)>, // (prop_key_id, serialized value bytes)
+}
+
+impl MergedPropsValue {
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(4 + self.properties.len() * 12);
+        buf.put_u32_le(self.properties.len() as u32);
+        for (prop_key_id, value_bytes) in &self.properties {
+            buf.put_u32_le(*prop_key_id);
+            buf.put_u32_le(value_bytes.len() as u32);
+            buf.extend_from_slice(value_bytes);
+        }
+        buf.freeze()
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, crate::Error> {
+        if data.len() < 4 {
+            return Err(crate::Error::Encoding(
+                "MergedPropsValue too short for count".to_string(),
+            ));
+        }
+        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let mut offset = 4;
+        let mut properties = Vec::with_capacity(count);
+        for _ in 0..count {
+            if offset + 8 > data.len() {
+                return Err(crate::Error::Encoding(
+                    "MergedPropsValue truncated at prop header".to_string(),
+                ));
+            }
+            let prop_key_id = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+            let value_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            if offset + value_len > data.len() {
+                return Err(crate::Error::Encoding(
+                    "MergedPropsValue truncated at value bytes".to_string(),
+                ));
+            }
+            let value_bytes = Bytes::copy_from_slice(&data[offset..offset + value_len]);
+            offset += value_len;
+            properties.push((prop_key_id, value_bytes));
+        }
+        Ok(Self { properties })
+    }
+
+    /// Gets the raw value bytes for a property key, if present.
+    pub fn get(&self, prop_key_id: u32) -> Option<&Bytes> {
+        self.properties
+            .iter()
+            .find(|(k, _)| *k == prop_key_id)
+            .map(|(_, v)| v)
+    }
+
+    /// Sets a property value (replaces if existing, appends if new).
+    pub fn set(&mut self, prop_key_id: u32, value: Bytes) {
+        if let Some(pos) = self.properties.iter().position(|(k, _)| *k == prop_key_id) {
+            self.properties[pos].1 = value;
+        } else {
+            self.properties.push((prop_key_id, value));
+        }
+    }
+
+    /// Removes a property by key id.
+    pub fn remove(&mut self, prop_key_id: u32) {
+        self.properties.retain(|(k, _)| *k != prop_key_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MergedAdjValue: [count:u32 LE]([peer_id:u64 LE][edge_id:u64 LE])*
+// ---------------------------------------------------------------------------
+
+/// Packed adjacency value for the Merged storage layout.
+///
+/// Stores all adjacency entries for a (node, edge_type) pair in a single value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct MergedAdjValue {
+    pub entries: Vec<(u64, u64)>, // (peer_node_id, edge_id)
+}
+
+impl MergedAdjValue {
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(4 + self.entries.len() * 16);
+        buf.put_u32_le(self.entries.len() as u32);
+        for &(peer_id, edge_id) in &self.entries {
+            buf.put_u64_le(peer_id);
+            buf.put_u64_le(edge_id);
+        }
+        buf.freeze()
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, crate::Error> {
+        if data.len() < 4 {
+            return Err(crate::Error::Encoding(
+                "MergedAdjValue too short for count".to_string(),
+            ));
+        }
+        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let expected_len = 4 + count * 16;
+        if data.len() < expected_len {
+            return Err(crate::Error::Encoding(format!(
+                "MergedAdjValue too short: need {expected_len}, got {}",
+                data.len()
+            )));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let offset = 4 + i * 16;
+            let peer_id = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            let edge_id = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+            entries.push((peer_id, edge_id));
+        }
+        Ok(Self { entries })
+    }
+
+    /// Adds an adjacency entry if not already present.
+    pub fn add(&mut self, peer_id: u64, edge_id: u64) {
+        if !self.entries.iter().any(|&(p, e)| p == peer_id && e == edge_id) {
+            self.entries.push((peer_id, edge_id));
+        }
+    }
+
+    /// Removes a matching (peer_id, edge_id) entry.
+    pub fn remove(&mut self, peer_id: u64, edge_id: u64) {
+        self.entries.retain(|&(p, e)| !(p == peer_id && e == edge_id));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sortable value encoding (for PropertyIndex keys)
 // ---------------------------------------------------------------------------
 
@@ -251,5 +439,144 @@ mod tests {
     #[test]
     fn should_return_none_for_unsortable_types() {
         assert!(encode_sortable_value(&Value::Null).is_none());
+    }
+
+    // --- MergedPropsValue tests ---
+
+    #[test]
+    fn should_roundtrip_merged_props_value() {
+        let v1 = encode_value(&Value::String("hello".into())).unwrap();
+        let v2 = encode_value(&Value::Int64(42)).unwrap();
+        let val = MergedPropsValue {
+            properties: vec![(1, v1.clone()), (2, v2.clone())],
+        };
+        let encoded = val.encode();
+        let decoded = MergedPropsValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn should_roundtrip_merged_props_value_empty() {
+        let val = MergedPropsValue::default();
+        let encoded = val.encode();
+        let decoded = MergedPropsValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn should_merged_props_set_and_get() {
+        let mut val = MergedPropsValue::default();
+        let v1 = Bytes::from_static(&[1, 2, 3]);
+        let v2 = Bytes::from_static(&[4, 5, 6]);
+
+        val.set(10, v1.clone());
+        assert_eq!(val.get(10), Some(&v1));
+        assert_eq!(val.get(99), None);
+
+        // Overwrite
+        val.set(10, v2.clone());
+        assert_eq!(val.get(10), Some(&v2));
+        assert_eq!(val.properties.len(), 1);
+    }
+
+    #[test]
+    fn should_merged_props_remove() {
+        let mut val = MergedPropsValue::default();
+        val.set(1, Bytes::from_static(&[1]));
+        val.set(2, Bytes::from_static(&[2]));
+        val.remove(1);
+        assert_eq!(val.get(1), None);
+        assert_eq!(val.properties.len(), 1);
+    }
+
+    #[test]
+    fn should_merged_props_reject_truncated() {
+        assert!(MergedPropsValue::decode(&[0, 0]).is_err());
+        assert!(MergedPropsValue::decode(&[1, 0, 0, 0]).is_err());
+    }
+
+    // --- MergedAdjValue tests ---
+
+    #[test]
+    fn should_roundtrip_merged_adj_value() {
+        let val = MergedAdjValue {
+            entries: vec![(10, 100), (20, 200), (30, 300)],
+        };
+        let encoded = val.encode();
+        let decoded = MergedAdjValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn should_roundtrip_merged_adj_value_empty() {
+        let val = MergedAdjValue::default();
+        let encoded = val.encode();
+        let decoded = MergedAdjValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn should_merged_adj_add_and_remove() {
+        let mut val = MergedAdjValue::default();
+        val.add(10, 100);
+        val.add(20, 200);
+        assert_eq!(val.entries.len(), 2);
+
+        // Duplicate add should be idempotent
+        val.add(10, 100);
+        assert_eq!(val.entries.len(), 2);
+
+        val.remove(10, 100);
+        assert_eq!(val.entries.len(), 1);
+        assert_eq!(val.entries[0], (20, 200));
+    }
+
+    #[test]
+    fn should_merged_adj_reject_truncated() {
+        assert!(MergedAdjValue::decode(&[0, 0]).is_err());
+        // Claims 1 entry but insufficient data
+        assert!(MergedAdjValue::decode(&[1, 0, 0, 0]).is_err());
+    }
+
+    // --- Merge operand encoding tests ---
+
+    #[test]
+    fn should_encode_prop_set_operand() {
+        let operand = encode_prop_set_operand(42, &Value::Int64(99)).unwrap();
+        assert_eq!(operand[0], PROP_MERGE_SET);
+        let prop_key_id = u32::from_le_bytes(operand[1..5].try_into().unwrap());
+        assert_eq!(prop_key_id, 42);
+        // Rest is the encoded value
+        let val = decode_value(&operand[5..]).unwrap();
+        assert_eq!(val, Value::Int64(99));
+    }
+
+    #[test]
+    fn should_encode_prop_remove_operand() {
+        let operand = encode_prop_remove_operand(42);
+        assert_eq!(operand[0], PROP_MERGE_REMOVE);
+        let prop_key_id = u32::from_le_bytes(operand[1..5].try_into().unwrap());
+        assert_eq!(prop_key_id, 42);
+        assert_eq!(operand.len(), 5);
+    }
+
+    #[test]
+    fn should_encode_adj_add_operand() {
+        let operand = encode_adj_add_operand(10, 100);
+        assert_eq!(operand[0], ADJ_MERGE_ADD);
+        let peer_id = u64::from_le_bytes(operand[1..9].try_into().unwrap());
+        let edge_id = u64::from_le_bytes(operand[9..17].try_into().unwrap());
+        assert_eq!(peer_id, 10);
+        assert_eq!(edge_id, 100);
+    }
+
+    #[test]
+    fn should_encode_adj_remove_operand() {
+        let operand = encode_adj_remove_operand(10, 100);
+        assert_eq!(operand[0], ADJ_MERGE_REMOVE);
+        let peer_id = u64::from_le_bytes(operand[1..9].try_into().unwrap());
+        let edge_id = u64::from_le_bytes(operand[9..17].try_into().unwrap());
+        assert_eq!(peer_id, 10);
+        assert_eq!(edge_id, 100);
     }
 }

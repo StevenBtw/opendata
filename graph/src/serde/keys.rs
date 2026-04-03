@@ -451,6 +451,134 @@ impl CatalogByNameKey {
 }
 
 // ---------------------------------------------------------------------------
+// MergedNodePropsKey: [sub][ver][0x30][node_id:u64 BE] = 11 bytes
+// Same tag as NodeProperty, shorter key (no prop_key_id).
+// Used by StorageLayout::Merged — all node properties in one key via merge op.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedNodePropsKey {
+    pub node_id: u64,
+}
+
+impl MergedNodePropsKey {
+    const SIZE: usize = 11;
+
+    pub fn encode(&self) -> Bytes {
+        encode_key(RecordType::NodeProperty, 0, Self::SIZE, |buf| {
+            buf.put_u64(self.node_id);
+        })
+    }
+
+    #[cfg(test)]
+    pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
+        decode_prefix(data, Self::SIZE, RecordType::NodeProperty, "MergedNodeProps")?;
+        let node_id = u64::from_be_bytes(data[3..11].try_into().unwrap());
+        Ok(Self { node_id })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MergedEdgePropsKey: [sub][ver][0x40][edge_id:u64 BE] = 11 bytes
+// Same tag as EdgeProperty, shorter key (no prop_key_id).
+// Used by StorageLayout::Merged — all edge properties in one key via merge op.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedEdgePropsKey {
+    pub edge_id: u64,
+}
+
+impl MergedEdgePropsKey {
+    const SIZE: usize = 11;
+
+    pub fn encode(&self) -> Bytes {
+        encode_key(RecordType::EdgeProperty, 0, Self::SIZE, |buf| {
+            buf.put_u64(self.edge_id);
+        })
+    }
+
+    #[cfg(test)]
+    pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
+        decode_prefix(data, Self::SIZE, RecordType::EdgeProperty, "MergedEdgeProps")?;
+        let edge_id = u64::from_be_bytes(data[3..11].try_into().unwrap());
+        Ok(Self { edge_id })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MergedForwardAdjKey: [sub][ver][0x50][src:u64 BE][type_id:u32 BE] = 15 bytes
+// Same tag as ForwardAdj, shorter key (no dst/edge_id).
+// Used by StorageLayout::Merged — all forward adj entries per (src, type) via merge op.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedForwardAdjKey {
+    pub src: u64,
+    pub edge_type_id: u32,
+}
+
+impl MergedForwardAdjKey {
+    const SIZE: usize = 15;
+
+    pub fn encode(&self) -> Bytes {
+        encode_key(RecordType::ForwardAdj, 0, Self::SIZE, |buf| {
+            buf.put_u64(self.src);
+            buf.put_u32(self.edge_type_id);
+        })
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
+        decode_prefix(data, Self::SIZE, RecordType::ForwardAdj, "MergedForwardAdj")?;
+        let src = u64::from_be_bytes(data[3..11].try_into().unwrap());
+        let edge_type_id = u32::from_be_bytes(data[11..15].try_into().unwrap());
+        Ok(Self { src, edge_type_id })
+    }
+
+    /// Prefix range covering all edge types for a given src node.
+    pub fn src_prefix(src: u64) -> BytesRange {
+        prefix_range(RecordType::ForwardAdj, |buf| buf.put_u64(src))
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// MergedBackwardAdjKey: [sub][ver][0x60][dst:u64 BE][type_id:u32 BE] = 15 bytes
+// Same tag as BackwardAdj, shorter key (no src/edge_id).
+// Used by StorageLayout::Merged — all backward adj entries per (dst, type) via merge op.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergedBackwardAdjKey {
+    pub dst: u64,
+    pub edge_type_id: u32,
+}
+
+impl MergedBackwardAdjKey {
+    const SIZE: usize = 15;
+
+    pub fn encode(&self) -> Bytes {
+        encode_key(RecordType::BackwardAdj, 0, Self::SIZE, |buf| {
+            buf.put_u64(self.dst);
+            buf.put_u32(self.edge_type_id);
+        })
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, DeserializeError> {
+        decode_prefix(data, Self::SIZE, RecordType::BackwardAdj, "MergedBackwardAdj")?;
+        let dst = u64::from_be_bytes(data[3..11].try_into().unwrap());
+        let edge_type_id = u32::from_be_bytes(data[11..15].try_into().unwrap());
+        Ok(Self { dst, edge_type_id })
+    }
+
+    /// Prefix range covering all edge types for a given dst node.
+    pub fn dst_prefix(dst: u64) -> BytesRange {
+        prefix_range(RecordType::BackwardAdj, |buf| buf.put_u64(dst))
+    }
+
+}
+
+// ---------------------------------------------------------------------------
 // MetadataKey: [sub][ver][0xE0][sub_type:u8] = 4 bytes
 // ---------------------------------------------------------------------------
 
@@ -913,5 +1041,101 @@ mod tests {
         .encode();
         assert!(k1 < k2, "same node, prop_key_id 0 < 1");
         assert!(k2 < k3, "node 1 < node 2");
+    }
+
+    // --- Merged key tests ---
+
+    #[test]
+    fn should_roundtrip_merged_node_props_key() {
+        let key = MergedNodePropsKey { node_id: 42 };
+        let encoded = key.encode();
+        assert_eq!(MergedNodePropsKey::decode(&encoded).unwrap(), key);
+        assert_eq!(encoded.len(), MergedNodePropsKey::SIZE);
+    }
+
+    #[test]
+    fn should_roundtrip_merged_edge_props_key() {
+        let key = MergedEdgePropsKey { edge_id: 99 };
+        let encoded = key.encode();
+        assert_eq!(MergedEdgePropsKey::decode(&encoded).unwrap(), key);
+        assert_eq!(encoded.len(), MergedEdgePropsKey::SIZE);
+    }
+
+    #[test]
+    fn should_roundtrip_merged_forward_adj_key() {
+        let key = MergedForwardAdjKey {
+            src: 1,
+            edge_type_id: 5,
+        };
+        let encoded = key.encode();
+        assert_eq!(MergedForwardAdjKey::decode(&encoded).unwrap(), key);
+        assert_eq!(encoded.len(), MergedForwardAdjKey::SIZE);
+    }
+
+    #[test]
+    fn should_roundtrip_merged_backward_adj_key() {
+        let key = MergedBackwardAdjKey {
+            dst: 2,
+            edge_type_id: 5,
+        };
+        let encoded = key.encode();
+        assert_eq!(MergedBackwardAdjKey::decode(&encoded).unwrap(), key);
+        assert_eq!(encoded.len(), MergedBackwardAdjKey::SIZE);
+    }
+
+    #[test]
+    fn should_merged_node_key_share_record_type_with_individual() {
+        let merged = MergedNodePropsKey { node_id: 42 }.encode();
+        let individual = NodePropertyKey {
+            node_id: 42,
+            prop_key_id: 0,
+        }
+        .encode();
+        assert_eq!(&merged[..3], &individual[..3]);
+    }
+
+    #[test]
+    fn should_merged_forward_adj_src_prefix_contain_all_types() {
+        let range = MergedForwardAdjKey::src_prefix(10);
+        assert!(range.contains(
+            &MergedForwardAdjKey {
+                src: 10,
+                edge_type_id: 1,
+            }
+            .encode()
+        ));
+        assert!(range.contains(
+            &MergedForwardAdjKey {
+                src: 10,
+                edge_type_id: 99,
+            }
+            .encode()
+        ));
+        assert!(!range.contains(
+            &MergedForwardAdjKey {
+                src: 11,
+                edge_type_id: 1,
+            }
+            .encode()
+        ));
+    }
+
+    #[test]
+    fn should_merged_backward_adj_dst_prefix_contain_all_types() {
+        let range = MergedBackwardAdjKey::dst_prefix(10);
+        assert!(range.contains(
+            &MergedBackwardAdjKey {
+                dst: 10,
+                edge_type_id: 1,
+            }
+            .encode()
+        ));
+        assert!(!range.contains(
+            &MergedBackwardAdjKey {
+                dst: 11,
+                edge_type_id: 1,
+            }
+            .encode()
+        ));
     }
 }

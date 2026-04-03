@@ -1,6 +1,6 @@
-//! Layer 2 & 3 integration tests for the SlateGraphStore.
+//! Layer 2 & 3 integration tests for the GraphStorage.
 //!
-//! These tests exercise the `GraphStore` and `GraphStoreMut` trait methods
+//! These tests exercise the `GraphStorage` and `GraphStorageMut` trait methods
 //! directly against a real (in-memory) SlateDB backend, bypassing the GQL
 //! query engine. They validate the RFC 0006 storage contract.
 
@@ -11,7 +11,7 @@ use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, 
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::traits::{GraphStore, GraphStoreMut};
 use graph::db::GraphDb;
-use graph::{Config, SlateGraphStore};
+use graph::{Config, GraphStorage};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers
@@ -25,8 +25,8 @@ async fn setup() -> Arc<GraphDb> {
     Arc::new(GraphDb::open_with_config(&config).await.unwrap())
 }
 
-/// Convenience: get a &SlateGraphStore that impls both traits.
-fn store(db: &GraphDb) -> &SlateGraphStore {
+/// Convenience: get a &GraphStorage that impls both traits.
+fn store(db: &GraphDb) -> &GraphStorage {
     db.store()
 }
 
@@ -213,6 +213,24 @@ async fn delete_node_edges_cleans_up() {
     assert!(s.get_edge(e1).is_none(), "outgoing edge should be deleted");
     assert!(s.get_edge(e2).is_none(), "incoming edge should be deleted");
     assert!(s.get_node(a).is_some(), "node itself should still exist");
+    assert_eq!(s.edge_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_node_edges_self_loop() {
+    let db = setup().await;
+    let s = store(&db);
+
+    let a = s.create_node(&[]);
+    let b = s.create_node(&[]);
+    let _e1 = s.create_edge(a, a, "SELF");
+    let _e2 = s.create_edge(a, b, "OTHER");
+    assert_eq!(s.edge_count(), 2);
+
+    s.delete_node_edges(a);
+
+    assert!(s.get_node(a).is_some(), "node itself should still exist");
+    assert_eq!(s.edge_count(), 0, "self-loop should be counted once");
 }
 
 #[tokio::test(flavor = "multi_thread")]

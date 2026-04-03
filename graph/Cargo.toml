@@ -89,3 +89,7 @@ tower.workspace = true
 [[bench]]
 name = "storage"
 harness = false
+
+[[bench]]
+name = "layout_comparison"
+harness = false

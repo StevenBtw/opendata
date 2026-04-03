@@ -12,7 +12,7 @@ A labeled property graph database with GQL queries, built on SlateDB. Uses [Graf
 
 ## Design
 
-Graph data is stored as flat key-value records in SlateDB, using a custom encoding scheme that preserves sort order for efficient range scans. Grafeo provides the query engine; OpenData provides the storage backend via its `GraphStore`/`GraphStoreMut` trait implementation.
+Graph data is stored as flat key-value records in SlateDB, using a custom encoding scheme that preserves sort order for efficient range scans. Grafeo provides the query engine; OpenData provides the storage backend via its `GraphStorage`/`GraphStorageMut` trait implementation.
 
 ### Record Types (in `src/serde/`)
 
@@ -33,8 +33,8 @@ Graph data is stored as flat key-value records in SlateDB, using a custom encodi
 ### Query Path
 
 1. Parse GQL query via Grafeo
-2. Grafeo's planner/optimizer calls `GraphStore` trait methods
-3. `SlateGraphStore` translates to SlateDB `get()`/`scan()` calls
+2. Grafeo's planner/optimizer calls `GraphStorage` trait methods
+3. `GraphStorage` translates to SlateDB `get()`/`scan()` calls
 4. Results flow back through Grafeo's executor
 
 ## Usage

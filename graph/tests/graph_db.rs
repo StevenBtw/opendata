@@ -2,7 +2,7 @@
 //!
 //! Written from the perspective of an end user familiar with OpenData's
 //! timeseries crate. These tests exercise the full stack: InMemory storage
-//! → SlateGraphStore → GrafeoDB engine → GQL queries.
+//! → GraphStorage → GrafeoDB engine → GQL queries.
 
 use std::sync::Arc;
 
