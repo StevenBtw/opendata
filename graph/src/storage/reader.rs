@@ -7,14 +7,14 @@ use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::CompareOp;
 use grafeo_core::graph::lpg::{Edge, Node};
-use grafeo_core::graph::traits::GraphStore;
+use grafeo_core::graph::traits::{GraphStore, GraphStoreSearch};
 use grafeo_core::statistics::Statistics;
 use smallvec::SmallVec;
 
 use super::GraphStorage;
-use crate::config::StorageLayout;
+use crate::serde::MetadataSubType;
 use crate::serde::keys::*;
-use crate::serde::values::{self, EdgeRecordValue, MergedAdjValue, NodeRecordValue};
+use crate::serde::values::{self, EdgeRecordValue, NodeRecordValue, PackedAdj};
 
 impl GraphStore for GraphStorage {
     fn get_node(&self, id: NodeId) -> Option<Node> {
@@ -71,46 +71,18 @@ impl GraphStore for GraphStorage {
 
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
         let prop_key_id = self.catalog.read().get_prop_key_id(key.as_str())?;
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                let prop_key = NodePropertyKey {
-                    node_id: id.0,
-                    prop_key_id,
-                };
-                self.exec(async { self.storage.get(prop_key.encode()).await })
-                    .ok()
-                    .flatten()
-                    .and_then(|record| values::decode_value(&record.value).ok())
-            }
-            StorageLayout::Merged => {
-                let merged = self.load_merged_node_props(id.0);
-                merged
-                    .get(prop_key_id)
-                    .and_then(|bytes| values::decode_value(bytes).ok())
-            }
-        }
+        let packed = self.load_node_props(id.0);
+        packed
+            .get(prop_key_id)
+            .and_then(|bytes| values::decode_value(bytes).ok())
     }
 
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         let prop_key_id = self.catalog.read().get_prop_key_id(key.as_str())?;
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                let prop_key = EdgePropertyKey {
-                    edge_id: id.0,
-                    prop_key_id,
-                };
-                self.exec(async { self.storage.get(prop_key.encode()).await })
-                    .ok()
-                    .flatten()
-                    .and_then(|record| values::decode_value(&record.value).ok())
-            }
-            StorageLayout::Merged => {
-                let merged = self.load_merged_edge_props(id.0);
-                merged
-                    .get(prop_key_id)
-                    .and_then(|bytes| values::decode_value(bytes).ok())
-            }
-        }
+        let packed = self.load_edge_props(id.0);
+        packed
+            .get(prop_key_id)
+            .and_then(|bytes| values::decode_value(bytes).ok())
     }
 
     // N serial get() calls per node. Not on the executor hot path today (the
@@ -133,46 +105,28 @@ impl GraphStore for GraphStorage {
         ids: &[NodeId],
         keys: &[PropertyKey],
     ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                ids.iter()
-                    .map(|id| {
-                        let mut map = FxHashMap::default();
-                        for key in keys {
-                            if let Some(val) = self.get_node_property(*id, key) {
-                                map.insert(key.clone(), val);
-                            }
-                        }
-                        map
-                    })
-                    .collect()
-            }
-            StorageLayout::Merged => {
-                let catalog = self.catalog.read();
-                let key_ids: Vec<Option<u32>> = keys
-                    .iter()
-                    .map(|k| catalog.get_prop_key_id(k.as_str()))
-                    .collect();
-                drop(catalog);
+        let catalog = self.catalog.read();
+        let key_ids: Vec<Option<u32>> = keys
+            .iter()
+            .map(|k| catalog.get_prop_key_id(k.as_str()))
+            .collect();
+        drop(catalog);
 
-                ids.iter()
-                    .map(|id| {
-                        let merged = self.load_merged_node_props(id.0);
-                        let mut map = FxHashMap::default();
-                        for (i, key) in keys.iter().enumerate() {
-                            if let Some(kid) = key_ids[i] {
-                                if let Some(val_bytes) = merged.get(kid) {
-                                    if let Ok(val) = values::decode_value(val_bytes) {
-                                        map.insert(key.clone(), val);
-                                    }
-                                }
-                            }
-                        }
-                        map
-                    })
-                    .collect()
-            }
-        }
+        ids.iter()
+            .map(|id| {
+                let packed = self.load_node_props(id.0);
+                let mut map = FxHashMap::default();
+                for (i, key) in keys.iter().enumerate() {
+                    if let Some(kid) = key_ids[i]
+                        && let Some(val_bytes) = packed.get(kid)
+                        && let Ok(val) = values::decode_value(val_bytes)
+                    {
+                        map.insert(key.clone(), val);
+                    }
+                }
+                map
+            })
+            .collect()
     }
 
     fn get_edges_properties_selective_batch(
@@ -180,99 +134,54 @@ impl GraphStore for GraphStorage {
         ids: &[EdgeId],
         keys: &[PropertyKey],
     ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                ids.iter()
-                    .map(|id| {
-                        let mut map = FxHashMap::default();
-                        for key in keys {
-                            if let Some(val) = self.get_edge_property(*id, key) {
-                                map.insert(key.clone(), val);
-                            }
-                        }
-                        map
-                    })
-                    .collect()
-            }
-            StorageLayout::Merged => {
-                let catalog = self.catalog.read();
-                let key_ids: Vec<Option<u32>> = keys
-                    .iter()
-                    .map(|k| catalog.get_prop_key_id(k.as_str()))
-                    .collect();
-                drop(catalog);
+        let catalog = self.catalog.read();
+        let key_ids: Vec<Option<u32>> = keys
+            .iter()
+            .map(|k| catalog.get_prop_key_id(k.as_str()))
+            .collect();
+        drop(catalog);
 
-                ids.iter()
-                    .map(|id| {
-                        let merged = self.load_merged_edge_props(id.0);
-                        let mut map = FxHashMap::default();
-                        for (i, key) in keys.iter().enumerate() {
-                            if let Some(kid) = key_ids[i] {
-                                if let Some(val_bytes) = merged.get(kid) {
-                                    if let Ok(val) = values::decode_value(val_bytes) {
-                                        map.insert(key.clone(), val);
-                                    }
-                                }
-                            }
-                        }
-                        map
-                    })
-                    .collect()
-            }
-        }
+        ids.iter()
+            .map(|id| {
+                let packed = self.load_edge_props(id.0);
+                let mut map = FxHashMap::default();
+                for (i, key) in keys.iter().enumerate() {
+                    if let Some(kid) = key_ids[i]
+                        && let Some(val_bytes) = packed.get(kid)
+                        && let Ok(val) = values::decode_value(val_bytes)
+                    {
+                        map.insert(key.clone(), val);
+                    }
+                }
+                map
+            })
+            .collect()
     }
 
     fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
         let mut result = Vec::new();
 
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                if matches!(direction, Direction::Outgoing | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(key) = ForwardAdjKey::decode(&record.key) {
-                            result.push(NodeId(key.dst));
-                        }
-                    }
-                }
-
-                if matches!(direction, Direction::Incoming | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(key) = BackwardAdjKey::decode(&record.key) {
-                            result.push(NodeId(key.src));
-                        }
+        if matches!(direction, Direction::Outgoing | Direction::Both)
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
+        {
+            for record in &records {
+                if let Ok(adj) = PackedAdj::decode(&record.value) {
+                    for &(peer, _edge_id) in &adj.entries {
+                        result.push(NodeId(peer));
                     }
                 }
             }
-            StorageLayout::Merged => {
-                if matches!(direction, Direction::Outgoing | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(MergedForwardAdjKey::src_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(adj) = MergedAdjValue::decode(&record.value) {
-                            for &(peer, _edge_id) in &adj.entries {
-                                result.push(NodeId(peer));
-                            }
-                        }
-                    }
-                }
+        }
 
-                if matches!(direction, Direction::Incoming | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(MergedBackwardAdjKey::dst_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(adj) = MergedAdjValue::decode(&record.value) {
-                            for &(peer, _edge_id) in &adj.entries {
-                                result.push(NodeId(peer));
-                            }
-                        }
+        if matches!(direction, Direction::Incoming | Direction::Both)
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
+        {
+            for record in &records {
+                if let Ok(adj) = PackedAdj::decode(&record.value) {
+                    for &(peer, _edge_id) in &adj.entries {
+                        result.push(NodeId(peer));
                     }
                 }
             }
@@ -284,54 +193,27 @@ impl GraphStore for GraphStorage {
     fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
         let mut result = Vec::new();
 
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                if matches!(direction, Direction::Outgoing | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(key) = ForwardAdjKey::decode(&record.key) {
-                            result.push((NodeId(key.dst), EdgeId(key.edge_id)));
-                        }
-                    }
-                }
-
-                if matches!(direction, Direction::Incoming | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(key) = BackwardAdjKey::decode(&record.key) {
-                            result.push((NodeId(key.src), EdgeId(key.edge_id)));
-                        }
+        if matches!(direction, Direction::Outgoing | Direction::Both)
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
+        {
+            for record in &records {
+                if let Ok(adj) = PackedAdj::decode(&record.value) {
+                    for &(peer, edge_id) in &adj.entries {
+                        result.push((NodeId(peer), EdgeId(edge_id)));
                     }
                 }
             }
-            StorageLayout::Merged => {
-                if matches!(direction, Direction::Outgoing | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(MergedForwardAdjKey::src_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(adj) = MergedAdjValue::decode(&record.value) {
-                            for &(peer, edge_id) in &adj.entries {
-                                result.push((NodeId(peer), EdgeId(edge_id)));
-                            }
-                        }
-                    }
-                }
+        }
 
-                if matches!(direction, Direction::Incoming | Direction::Both)
-                    && let Ok(records) =
-                        self.exec(async { self.storage.scan(MergedBackwardAdjKey::dst_prefix(node.0)).await })
-                {
-                    for record in &records {
-                        if let Ok(adj) = MergedAdjValue::decode(&record.value) {
-                            for &(peer, edge_id) in &adj.entries {
-                                result.push((NodeId(peer), EdgeId(edge_id)));
-                            }
-                        }
+        if matches!(direction, Direction::Incoming | Direction::Both)
+            && let Ok(records) =
+                self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
+        {
+            for record in &records {
+                if let Ok(adj) = PackedAdj::decode(&record.value) {
+                    for &(peer, edge_id) in &adj.entries {
+                        result.push((NodeId(peer), EdgeId(edge_id)));
                     }
                 }
             }
@@ -341,45 +223,27 @@ impl GraphStore for GraphStorage {
     }
 
     fn out_degree(&self, node: NodeId) -> usize {
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
-                    .map(|records| records.len())
-                    .unwrap_or(0)
-            }
-            StorageLayout::Merged => {
-                self.exec(async { self.storage.scan(MergedForwardAdjKey::src_prefix(node.0)).await })
-                    .map(|records| {
-                        records
-                            .iter()
-                            .filter_map(|r| MergedAdjValue::decode(&r.value).ok())
-                            .map(|a| a.entries.len())
-                            .sum()
-                    })
-                    .unwrap_or(0)
-            }
-        }
+        self.exec(async { self.storage.scan(ForwardAdjKey::src_prefix(node.0)).await })
+            .map(|records| {
+                records
+                    .iter()
+                    .filter_map(|r| PackedAdj::decode(&r.value).ok())
+                    .map(|a| a.entries.len())
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     fn in_degree(&self, node: NodeId) -> usize {
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
-                    .map(|records| records.len())
-                    .unwrap_or(0)
-            }
-            StorageLayout::Merged => {
-                self.exec(async { self.storage.scan(MergedBackwardAdjKey::dst_prefix(node.0)).await })
-                    .map(|records| {
-                        records
-                            .iter()
-                            .filter_map(|r| MergedAdjValue::decode(&r.value).ok())
-                            .map(|a| a.entries.len())
-                            .sum()
-                    })
-                    .unwrap_or(0)
-            }
-        }
+        self.exec(async { self.storage.scan(BackwardAdjKey::dst_prefix(node.0)).await })
+            .map(|records| {
+                records
+                    .iter()
+                    .filter_map(|r| PackedAdj::decode(&r.value).ok())
+                    .map(|a| a.entries.len())
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     fn has_backward_adjacency(&self) -> bool {
@@ -459,18 +323,14 @@ impl GraphStore for GraphStorage {
         let range = PropertyIndexKey::prop_value_prefix(prop_id, &sortable);
         let candidates = self.node_ids_from_index_scan(range);
 
-        // In Merged mode, PropertyIndex may contain stale entries because
-        // set_node_property uses blind writes (no read-before-write). Filter
-        // candidates by verifying the actual current property value.
-        if matches!(self.storage_layout, StorageLayout::Merged) {
-            let prop_key = PropertyKey::new(property);
-            candidates
-                .into_iter()
-                .filter(|id| self.get_node_property(*id, &prop_key).as_ref() == Some(value))
-                .collect()
-        } else {
-            candidates
-        }
+        // PropertyIndex may contain stale entries because set_node_property
+        // uses blind writes (no read-before-write). Verify candidates against
+        // the current packed property value.
+        let prop_key = PropertyKey::new(property);
+        candidates
+            .into_iter()
+            .filter(|id| self.get_node_property(*id, &prop_key).as_ref() == Some(value))
+            .collect()
     }
 
     fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
@@ -515,39 +375,39 @@ impl GraphStore for GraphStorage {
 
         let candidates = self.node_ids_from_index_scan(range);
 
-        // In Merged mode, filter stale PropertyIndex entries by verifying
-        // the node still exists and its property falls within the range.
-        if matches!(self.storage_layout, StorageLayout::Merged) {
-            let prop_key = PropertyKey::new(property);
-            candidates
-                .into_iter()
-                .filter(|id| {
-                    let Some(val) = self.get_node_property(*id, &prop_key) else {
-                        return false;
-                    };
-                    let Some(val_sortable) = values::encode_sortable_value(&val) else {
-                        return false;
-                    };
-                    if let Some(ref min_b) = min_bytes {
-                        if min_inclusive {
-                            if val_sortable < **min_b { return false; }
-                        } else if val_sortable <= **min_b {
+        // Filter stale PropertyIndex entries by re-verifying the node's
+        // current property value falls within the range.
+        let prop_key = PropertyKey::new(property);
+        candidates
+            .into_iter()
+            .filter(|id| {
+                let Some(val) = self.get_node_property(*id, &prop_key) else {
+                    return false;
+                };
+                let Some(val_sortable) = values::encode_sortable_value(&val) else {
+                    return false;
+                };
+                if let Some(ref min_b) = min_bytes {
+                    if min_inclusive {
+                        if val_sortable < **min_b {
                             return false;
                         }
+                    } else if val_sortable <= **min_b {
+                        return false;
                     }
-                    if let Some(ref max_b) = max_bytes {
-                        if max_inclusive {
-                            if val_sortable > **max_b { return false; }
-                        } else if val_sortable >= **max_b {
+                }
+                if let Some(ref max_b) = max_bytes {
+                    if max_inclusive {
+                        if val_sortable > **max_b {
                             return false;
                         }
+                    } else if val_sortable >= **max_b {
+                        return false;
                     }
-                    true
-                })
-                .collect()
-        } else {
-            candidates
-        }
+                }
+                true
+            })
+            .collect()
     }
 
     fn node_property_might_match(
@@ -584,26 +444,51 @@ impl GraphStore for GraphStorage {
             }
         };
 
-        let range = LabelIndexKey::label_prefix(label_id);
-        let count = self.exec(async {
-            let mut iter = self.storage.scan_iter(range).await?;
-            let mut n: u64 = 0;
-            while iter.next().await?.is_some() {
-                n += 1;
-            }
-            Ok(n)
-        });
+        let key = KeyedMetadataKey {
+            sub_type: MetadataSubType::LabelNodeCount,
+            id: label_id,
+        }
+        .encode();
 
-        count.unwrap_or(0) as f64
+        match self.exec(async { self.storage.get(key).await }) {
+            Ok(Some(record)) if record.value.len() >= 8 => {
+                i64::from_le_bytes(record.value[..8].try_into().unwrap()).max(0) as f64
+            }
+            _ => 0.0,
+        }
     }
 
-    // Returns global avg degree regardless of edge type. No per-type counters
-    // exist yet, so the optimizer gets identical estimates for all edge types.
-    // See RFC 0006 "Statistics granularity" in Future Considerations.
-    fn estimate_avg_degree(&self, _edge_type: &str, _outgoing: bool) -> f64 {
+    fn estimate_avg_degree(&self, edge_type: &str, _outgoing: bool) -> f64 {
+        let type_id = {
+            let catalog = self.catalog.read();
+            catalog.get_edge_type_id(edge_type)
+        };
+
+        // Per-edge-type average degree: type_edge_count / total_nodes. If the
+        // edge type is unknown or no counter is present yet, fall back to the
+        // global average so early reads before the first write still return a
+        // sane estimate.
         let nc = self.node_count() as f64;
-        let ec = self.edge_count() as f64;
-        if nc > 0.0 { ec / nc } else { 0.0 }
+        if nc <= 0.0 {
+            return 0.0;
+        }
+
+        if let Some(type_id) = type_id {
+            let key = KeyedMetadataKey {
+                sub_type: MetadataSubType::EdgeTypeCount,
+                id: type_id,
+            }
+            .encode();
+            if let Ok(Some(record)) = self.exec(async { self.storage.get(key).await })
+                && record.value.len() >= 8
+            {
+                let type_count =
+                    i64::from_le_bytes(record.value[..8].try_into().unwrap()).max(0) as f64;
+                return type_count / nc;
+            }
+        }
+
+        self.edge_count() as f64 / nc
     }
 
     fn current_epoch(&self) -> EpochId {
@@ -652,75 +537,31 @@ impl GraphStorage {
     }
 
     fn load_node_properties(&self, node_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                let records = self.exec(async {
-                    self.storage
-                        .scan(NodePropertyKey::node_prefix(node_id))
-                        .await
-                })?;
-                let catalog = self.catalog.read();
-                let mut props = FxHashMap::default();
-                for record in &records {
-                    if let Ok(key) = NodePropertyKey::decode(&record.key)
-                        && let Some(name) = catalog.get_prop_key_name(key.prop_key_id)
-                        && let Ok(val) = values::decode_value(&record.value)
-                    {
-                        props.insert(PropertyKey::new(name.as_str()), val);
-                    }
-                }
-                Ok(props)
-            }
-            StorageLayout::Merged => {
-                let merged = self.load_merged_node_props(node_id);
-                let catalog = self.catalog.read();
-                let mut props = FxHashMap::default();
-                for (prop_key_id, val_bytes) in &merged.properties {
-                    if let Some(name) = catalog.get_prop_key_name(*prop_key_id) {
-                        if let Ok(val) = values::decode_value(val_bytes) {
-                            props.insert(PropertyKey::new(name.as_str()), val);
-                        }
-                    }
-                }
-                Ok(props)
+        let packed = self.load_node_props(node_id);
+        let catalog = self.catalog.read();
+        let mut props = FxHashMap::default();
+        for (prop_key_id, val_bytes) in &packed.properties {
+            if let Some(name) = catalog.get_prop_key_name(*prop_key_id)
+                && let Ok(val) = values::decode_value(val_bytes)
+            {
+                props.insert(PropertyKey::new(name.as_str()), val);
             }
         }
+        Ok(props)
     }
 
     fn load_edge_properties(&self, edge_id: u64) -> crate::Result<FxHashMap<PropertyKey, Value>> {
-        match self.storage_layout {
-            StorageLayout::Individual => {
-                let records = self.exec(async {
-                    self.storage
-                        .scan(EdgePropertyKey::edge_prefix(edge_id))
-                        .await
-                })?;
-                let catalog = self.catalog.read();
-                let mut props = FxHashMap::default();
-                for record in &records {
-                    if let Ok(key) = EdgePropertyKey::decode(&record.key)
-                        && let Some(name) = catalog.get_prop_key_name(key.prop_key_id)
-                        && let Ok(val) = values::decode_value(&record.value)
-                    {
-                        props.insert(PropertyKey::new(name.as_str()), val);
-                    }
-                }
-                Ok(props)
-            }
-            StorageLayout::Merged => {
-                let merged = self.load_merged_edge_props(edge_id);
-                let catalog = self.catalog.read();
-                let mut props = FxHashMap::default();
-                for (prop_key_id, val_bytes) in &merged.properties {
-                    if let Some(name) = catalog.get_prop_key_name(*prop_key_id) {
-                        if let Ok(val) = values::decode_value(val_bytes) {
-                            props.insert(PropertyKey::new(name.as_str()), val);
-                        }
-                    }
-                }
-                Ok(props)
+        let packed = self.load_edge_props(edge_id);
+        let catalog = self.catalog.read();
+        let mut props = FxHashMap::default();
+        for (prop_key_id, val_bytes) in &packed.properties {
+            if let Some(name) = catalog.get_prop_key_name(*prop_key_id)
+                && let Ok(val) = values::decode_value(val_bytes)
+            {
+                props.insert(PropertyKey::new(name.as_str()), val);
             }
         }
+        Ok(props)
     }
 
     /// Extracts NodeIds from the last 8 bytes of keys in an index scan.
@@ -756,3 +597,9 @@ impl GraphStorage {
         Ok(labels)
     }
 }
+
+// Text and vector search are not yet wired into the KV storage layout;
+// fall through to `GraphStoreSearch`'s default no-op methods so the planner
+// falls back to per-row evaluation. Future RFCs will define the record types
+// needed for BM25 and HNSW indexes.
+impl GraphStoreSearch for GraphStorage {}

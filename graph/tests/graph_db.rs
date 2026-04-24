@@ -58,7 +58,7 @@ async fn test_create_and_match_node() {
         .expect("MATCH should succeed");
 
     assert_eq!(result.columns.len(), 2);
-    assert!(!result.rows.is_empty(), "Should find the created Person");
+    assert!(!result.rows().is_empty(), "Should find the created Person");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -77,7 +77,7 @@ async fn test_create_multiple_nodes() {
         .execute("MATCH (n:Person) RETURN n.name")
         .expect("MATCH should succeed");
 
-    assert_eq!(result.rows.len(), 3, "Should find all three Person nodes");
+    assert_eq!(result.rows().len(), 3, "Should find all three Person nodes");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -96,7 +96,7 @@ async fn test_create_edge_between_nodes() {
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
         .expect("MATCH edge should succeed");
 
-    assert_eq!(result.rows.len(), 1, "Should find the KNOWS relationship");
+    assert_eq!(result.rows().len(), 1, "Should find the KNOWS relationship");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -116,7 +116,7 @@ async fn test_create_edge_with_properties() {
         .execute("MATCH ()-[r:KNOWS]->() RETURN r.since")
         .expect("MATCH edge property should succeed");
 
-    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -133,7 +133,7 @@ async fn test_match_with_property_filter() {
         .execute("MATCH (n:Person {name: 'Alice'}) RETURN n.name, n.age")
         .expect("Filtered MATCH should succeed");
 
-    assert_eq!(result.rows.len(), 1, "Filter should match only Alice");
+    assert_eq!(result.rows().len(), 1, "Filter should match only Alice");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -149,7 +149,7 @@ async fn test_multiple_labels() {
         .execute("MATCH (n:Employee) RETURN n.name")
         .expect("MATCH by second label should succeed");
 
-    assert_eq!(result.rows.len(), 1, "Only Alice has the Employee label");
+    assert_eq!(result.rows().len(), 1, "Only Alice has the Employee label");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -165,7 +165,7 @@ async fn test_return_count() {
         .execute("MATCH (n:City) RETURN count(n)")
         .expect("COUNT should succeed");
 
-    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -191,7 +191,7 @@ async fn test_graph_traversal_two_hops() {
         .execute("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name")
         .expect("Two-hop traversal should succeed");
 
-    assert_eq!(result.rows.len(), 1, "Should find Charlie via two hops");
+    assert_eq!(result.rows().len(), 1, "Should find Charlie via two hops");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -203,7 +203,7 @@ async fn test_empty_match_returns_no_rows() {
         .execute("MATCH (n:NonExistentLabel) RETURN n")
         .expect("MATCH on empty graph should succeed");
 
-    assert!(result.rows.is_empty(), "No nodes should match");
+    assert!(result.rows().is_empty(), "No nodes should match");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -218,6 +218,6 @@ async fn test_string_and_numeric_properties() {
         .execute("MATCH (n:Item) RETURN n.name, n.price, n.quantity, n.active")
         .expect("Mixed property types should work");
 
-    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows().len(), 1);
     assert_eq!(result.columns.len(), 4);
 }

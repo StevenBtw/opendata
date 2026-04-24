@@ -67,21 +67,39 @@ impl TryFrom<u8> for CatalogKind {
 }
 
 /// Metadata sub-types stored after the key prefix.
+///
+/// Aggregate counters (`NodeCount`, `EdgeCount`) have a 4-byte key:
+/// `[sub][ver][0xE0][sub_type]`.
+///
+/// Per-type counters (`LabelNodeCount`, `EdgeTypeCount`) have an 8-byte key:
+/// `[sub][ver][0xE0][sub_type][id:u32 BE]`. They feed the cost-based
+/// optimizer with per-label cardinality and per-edge-type average degree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum MetadataSubType {
-    NodeCount = 0,
-    EdgeCount = 1,
+    NodeCount = 0x00,
+    EdgeCount = 0x01,
+    LabelNodeCount = 0x10,
+    EdgeTypeCount = 0x11,
+}
+
+impl MetadataSubType {
+    /// Returns true if this sub-type is keyed by a trailing `u32` id.
+    pub(crate) fn is_keyed(self) -> bool {
+        matches!(self, Self::LabelNodeCount | Self::EdgeTypeCount)
+    }
 }
 
 impl TryFrom<u8> for MetadataSubType {
     type Error = common::serde::DeserializeError;
     fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
-            0 => Ok(Self::NodeCount),
-            1 => Ok(Self::EdgeCount),
+            0x00 => Ok(Self::NodeCount),
+            0x01 => Ok(Self::EdgeCount),
+            0x10 => Ok(Self::LabelNodeCount),
+            0x11 => Ok(Self::EdgeTypeCount),
             other => Err(common::serde::DeserializeError {
-                message: format!("unknown metadata sub-type: {other}"),
+                message: format!("unknown metadata sub-type: {other:#x}"),
             }),
         }
     }

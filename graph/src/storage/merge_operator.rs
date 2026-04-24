@@ -3,7 +3,7 @@ use common::storage::MergeOperator;
 
 use crate::serde::RecordType;
 use crate::serde::values::{
-    ADJ_MERGE_ADD, ADJ_MERGE_REMOVE, MergedAdjValue, MergedPropsValue, PROP_MERGE_REMOVE,
+    ADJ_MERGE_ADD, ADJ_MERGE_REMOVE, PackedAdj, PackedProps, PROP_MERGE_REMOVE,
     PROP_MERGE_SET,
 };
 
@@ -16,10 +16,6 @@ use crate::serde::values::{
 ///   (add/remove) applied sequentially to a packed adjacency blob.
 /// - **Metadata** (tag 0xE0): additive i64 counter merge.
 /// - Everything else: last-write-wins.
-///
-/// When running in `Individual` layout mode, properties and adjacency use `put()`
-/// (not merge), so the property/adjacency branches never fire. The same code
-/// works for both layouts.
 pub struct GraphMergeOperator;
 
 impl MergeOperator for GraphMergeOperator {
@@ -62,8 +58,8 @@ impl MergeOperator for GraphMergeOperator {
 /// Merges property operands into a packed properties blob.
 fn merge_properties(existing: Option<Bytes>, operands: &[Bytes]) -> Bytes {
     let mut props = match &existing {
-        Some(data) => MergedPropsValue::decode(data).unwrap_or_default(),
-        None => MergedPropsValue::default(),
+        Some(data) => PackedProps::decode(data).unwrap_or_default(),
+        None => PackedProps::default(),
     };
 
     for op in operands {
@@ -92,8 +88,8 @@ fn merge_properties(existing: Option<Bytes>, operands: &[Bytes]) -> Bytes {
 /// Merges adjacency operands into a packed adjacency blob.
 fn merge_adjacency(existing: Option<Bytes>, operands: &[Bytes]) -> Bytes {
     let mut adj = match &existing {
-        Some(data) => MergedAdjValue::decode(data).unwrap_or_default(),
-        None => MergedAdjValue::default(),
+        Some(data) => PackedAdj::decode(data).unwrap_or_default(),
+        None => PackedAdj::default(),
     };
 
     for op in operands {
@@ -144,7 +140,7 @@ fn merge_i64_counter(existing: Option<Bytes>, new: Bytes) -> Bytes {
 mod tests {
     use super::*;
     use crate::serde::MetadataSubType;
-    use crate::serde::keys::{MergedBackwardAdjKey, MergedForwardAdjKey, MergedNodePropsKey};
+    use crate::serde::keys::{BackwardAdjKey, ForwardAdjKey, NodePropsKey};
     use crate::serde::values::{
         encode_adj_add_operand, encode_adj_remove_operand, encode_prop_remove_operand,
         encode_prop_set_operand,
@@ -206,11 +202,11 @@ mod tests {
     #[test]
     fn should_merge_property_set_from_empty() {
         let op = GraphMergeOperator;
-        let key = MergedNodePropsKey { node_id: 1 }.encode();
+        let key = NodePropsKey { node_id: 1 }.encode();
         let operand = encode_prop_set_operand(10, &Value::Int64(42)).unwrap();
 
         let result = op.merge_batch(&key, None, &[operand]);
-        let props = MergedPropsValue::decode(&result).unwrap();
+        let props = PackedProps::decode(&result).unwrap();
         assert_eq!(props.properties.len(), 1);
         assert_eq!(props.properties[0].0, 10);
     }
@@ -218,7 +214,7 @@ mod tests {
     #[test]
     fn should_merge_property_set_overwrite() {
         let op = GraphMergeOperator;
-        let key = MergedNodePropsKey { node_id: 1 }.encode();
+        let key = NodePropsKey { node_id: 1 }.encode();
 
         // Set initial
         let o1 = encode_prop_set_operand(10, &Value::Int64(42)).unwrap();
@@ -227,7 +223,7 @@ mod tests {
         // Overwrite
         let o2 = encode_prop_set_operand(10, &Value::Int64(99)).unwrap();
         let result = op.merge_batch(&key, Some(result), &[o2]);
-        let props = MergedPropsValue::decode(&result).unwrap();
+        let props = PackedProps::decode(&result).unwrap();
         assert_eq!(props.properties.len(), 1);
 
         let val = crate::serde::values::decode_value(&props.properties[0].1).unwrap();
@@ -237,7 +233,7 @@ mod tests {
     #[test]
     fn should_merge_property_set_then_remove() {
         let op = GraphMergeOperator;
-        let key = MergedNodePropsKey { node_id: 1 }.encode();
+        let key = NodePropsKey { node_id: 1 }.encode();
 
         let o1 = encode_prop_set_operand(10, &Value::Int64(42)).unwrap();
         let o2 = encode_prop_set_operand(20, &Value::String("hello".into())).unwrap();
@@ -245,7 +241,7 @@ mod tests {
 
         let o3 = encode_prop_remove_operand(10);
         let result = op.merge_batch(&key, Some(result), &[o3]);
-        let props = MergedPropsValue::decode(&result).unwrap();
+        let props = PackedProps::decode(&result).unwrap();
         assert_eq!(props.properties.len(), 1);
         assert_eq!(props.properties[0].0, 20);
     }
@@ -253,7 +249,7 @@ mod tests {
     #[test]
     fn should_merge_multiple_property_operands_in_one_batch() {
         let op = GraphMergeOperator;
-        let key = MergedNodePropsKey { node_id: 1 }.encode();
+        let key = NodePropsKey { node_id: 1 }.encode();
 
         let o1 = encode_prop_set_operand(1, &Value::Int64(10)).unwrap();
         let o2 = encode_prop_set_operand(2, &Value::Int64(20)).unwrap();
@@ -261,7 +257,7 @@ mod tests {
         let o4 = encode_prop_remove_operand(2);
 
         let result = op.merge_batch(&key, None, &[o1, o2, o3, o4]);
-        let props = MergedPropsValue::decode(&result).unwrap();
+        let props = PackedProps::decode(&result).unwrap();
         assert_eq!(props.properties.len(), 1);
         assert_eq!(props.properties[0].0, 1);
         let val = crate::serde::values::decode_value(&props.properties[0].1).unwrap();
@@ -273,7 +269,7 @@ mod tests {
     #[test]
     fn should_merge_adj_add_from_empty() {
         let op = GraphMergeOperator;
-        let key = MergedForwardAdjKey {
+        let key = ForwardAdjKey {
             src: 1,
             edge_type_id: 5,
         }
@@ -281,14 +277,14 @@ mod tests {
         let operand = encode_adj_add_operand(10, 100);
 
         let result = op.merge_batch(&key, None, &[operand]);
-        let adj = MergedAdjValue::decode(&result).unwrap();
+        let adj = PackedAdj::decode(&result).unwrap();
         assert_eq!(adj.entries, vec![(10, 100)]);
     }
 
     #[test]
     fn should_merge_adj_add_multiple() {
         let op = GraphMergeOperator;
-        let key = MergedForwardAdjKey {
+        let key = ForwardAdjKey {
             src: 1,
             edge_type_id: 5,
         }
@@ -297,14 +293,14 @@ mod tests {
         let o1 = encode_adj_add_operand(10, 100);
         let o2 = encode_adj_add_operand(20, 200);
         let result = op.merge_batch(&key, None, &[o1, o2]);
-        let adj = MergedAdjValue::decode(&result).unwrap();
+        let adj = PackedAdj::decode(&result).unwrap();
         assert_eq!(adj.entries, vec![(10, 100), (20, 200)]);
     }
 
     #[test]
     fn should_merge_adj_add_then_remove() {
         let op = GraphMergeOperator;
-        let key = MergedBackwardAdjKey {
+        let key = BackwardAdjKey {
             dst: 2,
             edge_type_id: 5,
         }
@@ -316,14 +312,14 @@ mod tests {
 
         let o3 = encode_adj_remove_operand(10, 100);
         let result = op.merge_batch(&key, Some(result), &[o3]);
-        let adj = MergedAdjValue::decode(&result).unwrap();
+        let adj = PackedAdj::decode(&result).unwrap();
         assert_eq!(adj.entries, vec![(20, 200)]);
     }
 
     #[test]
     fn should_merge_adj_add_idempotent() {
         let op = GraphMergeOperator;
-        let key = MergedForwardAdjKey {
+        let key = ForwardAdjKey {
             src: 1,
             edge_type_id: 5,
         }
@@ -332,20 +328,20 @@ mod tests {
         let o1 = encode_adj_add_operand(10, 100);
         let o2 = encode_adj_add_operand(10, 100); // duplicate
         let result = op.merge_batch(&key, None, &[o1, o2]);
-        let adj = MergedAdjValue::decode(&result).unwrap();
+        let adj = PackedAdj::decode(&result).unwrap();
         assert_eq!(adj.entries.len(), 1);
     }
 
     #[test]
     fn should_ignore_malformed_operands() {
         let op = GraphMergeOperator;
-        let key = MergedNodePropsKey { node_id: 1 }.encode();
+        let key = NodePropsKey { node_id: 1 }.encode();
 
         // Too short operand
         let malformed = Bytes::from_static(&[0x01, 0x02]);
         let good = encode_prop_set_operand(10, &Value::Int64(42)).unwrap();
         let result = op.merge_batch(&key, None, &[malformed, good]);
-        let props = MergedPropsValue::decode(&result).unwrap();
+        let props = PackedProps::decode(&result).unwrap();
         assert_eq!(props.properties.len(), 1);
     }
 }

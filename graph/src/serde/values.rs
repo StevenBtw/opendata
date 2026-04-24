@@ -39,7 +39,7 @@ impl NodeRecordValue {
 }
 
 // ---------------------------------------------------------------------------
-// EdgeRecordValue: src(8) + dst(8) + type_id(4) + prop_count(2) = 22 bytes
+// EdgeRecordValue: src(8) + dst(8) + type_id(4) = 20 bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,18 +47,16 @@ pub(crate) struct EdgeRecordValue {
     pub src: u64,
     pub dst: u64,
     pub type_id: u32,
-    pub prop_count: u16,
 }
 
 impl EdgeRecordValue {
-    const SIZE: usize = 22;
+    const SIZE: usize = 20;
 
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(Self::SIZE);
         buf.put_u64_le(self.src);
         buf.put_u64_le(self.dst);
         buf.put_u32_le(self.type_id);
-        buf.put_u16_le(self.prop_count);
         buf.freeze()
     }
 
@@ -73,13 +71,7 @@ impl EdgeRecordValue {
         let src = u64::from_le_bytes(data[0..8].try_into().unwrap());
         let dst = u64::from_le_bytes(data[8..16].try_into().unwrap());
         let type_id = u32::from_le_bytes(data[16..20].try_into().unwrap());
-        let prop_count = u16::from_le_bytes(data[20..22].try_into().unwrap());
-        Ok(Self {
-            src,
-            dst,
-            type_id,
-            prop_count,
-        })
+        Ok(Self { src, dst, type_id })
     }
 }
 
@@ -102,7 +94,7 @@ pub(crate) fn decode_value(data: &[u8]) -> Result<Value, crate::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Merge operand constants and encoding (for StorageLayout::Merged)
+// Merge operand constants and encoding
 // ---------------------------------------------------------------------------
 
 /// Actions for property merge operands.
@@ -150,19 +142,19 @@ pub(crate) fn encode_adj_remove_operand(peer_id: u64, edge_id: u64) -> Bytes {
 }
 
 // ---------------------------------------------------------------------------
-// MergedPropsValue: [count:u32 LE]([prop_key_id:u32 LE][val_len:u32 LE][val_bytes])*
+// PackedProps: [count:u32 LE]([prop_key_id:u32 LE][val_len:u32 LE][val_bytes])*
 // ---------------------------------------------------------------------------
 
-/// Packed properties value for the Merged storage layout.
+/// Packed properties value stored at NodePropsKey or EdgePropsKey.
 ///
 /// Stores all properties of an entity in a single value, with each property
 /// identified by its catalog prop_key_id and raw serialized value bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct MergedPropsValue {
+pub(crate) struct PackedProps {
     pub properties: Vec<(u32, Bytes)>, // (prop_key_id, serialized value bytes)
 }
 
-impl MergedPropsValue {
+impl PackedProps {
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(4 + self.properties.len() * 12);
         buf.put_u32_le(self.properties.len() as u32);
@@ -177,7 +169,7 @@ impl MergedPropsValue {
     pub fn decode(data: &[u8]) -> Result<Self, crate::Error> {
         if data.len() < 4 {
             return Err(crate::Error::Encoding(
-                "MergedPropsValue too short for count".to_string(),
+                "PackedProps too short for count".to_string(),
             ));
         }
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
@@ -186,7 +178,7 @@ impl MergedPropsValue {
         for _ in 0..count {
             if offset + 8 > data.len() {
                 return Err(crate::Error::Encoding(
-                    "MergedPropsValue truncated at prop header".to_string(),
+                    "PackedProps truncated at prop header".to_string(),
                 ));
             }
             let prop_key_id = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
@@ -196,7 +188,7 @@ impl MergedPropsValue {
             offset += 4;
             if offset + value_len > data.len() {
                 return Err(crate::Error::Encoding(
-                    "MergedPropsValue truncated at value bytes".to_string(),
+                    "PackedProps truncated at value bytes".to_string(),
                 ));
             }
             let value_bytes = Bytes::copy_from_slice(&data[offset..offset + value_len]);
@@ -230,18 +222,18 @@ impl MergedPropsValue {
 }
 
 // ---------------------------------------------------------------------------
-// MergedAdjValue: [count:u32 LE]([peer_id:u64 LE][edge_id:u64 LE])*
+// PackedAdj: [count:u32 LE]([peer_id:u64 LE][edge_id:u64 LE])*
 // ---------------------------------------------------------------------------
 
-/// Packed adjacency value for the Merged storage layout.
+/// Packed adjacency value stored at ForwardAdjKey or BackwardAdjKey.
 ///
 /// Stores all adjacency entries for a (node, edge_type) pair in a single value.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct MergedAdjValue {
+pub(crate) struct PackedAdj {
     pub entries: Vec<(u64, u64)>, // (peer_node_id, edge_id)
 }
 
-impl MergedAdjValue {
+impl PackedAdj {
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(4 + self.entries.len() * 16);
         buf.put_u32_le(self.entries.len() as u32);
@@ -255,14 +247,14 @@ impl MergedAdjValue {
     pub fn decode(data: &[u8]) -> Result<Self, crate::Error> {
         if data.len() < 4 {
             return Err(crate::Error::Encoding(
-                "MergedAdjValue too short for count".to_string(),
+                "PackedAdj too short for count".to_string(),
             ));
         }
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
         let expected_len = 4 + count * 16;
         if data.len() < expected_len {
             return Err(crate::Error::Encoding(format!(
-                "MergedAdjValue too short: need {expected_len}, got {}",
+                "PackedAdj too short: need {expected_len}, got {}",
                 data.len()
             )));
         }
@@ -344,7 +336,6 @@ mod tests {
             src: 10,
             dst: 20,
             type_id: 3,
-            prop_count: 1,
         };
 
         // when
@@ -441,31 +432,31 @@ mod tests {
         assert!(encode_sortable_value(&Value::Null).is_none());
     }
 
-    // --- MergedPropsValue tests ---
+    // --- PackedProps tests ---
 
     #[test]
-    fn should_roundtrip_merged_props_value() {
+    fn should_roundtrip_packed_props() {
         let v1 = encode_value(&Value::String("hello".into())).unwrap();
         let v2 = encode_value(&Value::Int64(42)).unwrap();
-        let val = MergedPropsValue {
+        let val = PackedProps {
             properties: vec![(1, v1.clone()), (2, v2.clone())],
         };
         let encoded = val.encode();
-        let decoded = MergedPropsValue::decode(&encoded).unwrap();
+        let decoded = PackedProps::decode(&encoded).unwrap();
         assert_eq!(decoded, val);
     }
 
     #[test]
-    fn should_roundtrip_merged_props_value_empty() {
-        let val = MergedPropsValue::default();
+    fn should_roundtrip_packed_props_empty() {
+        let val = PackedProps::default();
         let encoded = val.encode();
-        let decoded = MergedPropsValue::decode(&encoded).unwrap();
+        let decoded = PackedProps::decode(&encoded).unwrap();
         assert_eq!(decoded, val);
     }
 
     #[test]
-    fn should_merged_props_set_and_get() {
-        let mut val = MergedPropsValue::default();
+    fn should_packed_props_set_and_get() {
+        let mut val = PackedProps::default();
         let v1 = Bytes::from_static(&[1, 2, 3]);
         let v2 = Bytes::from_static(&[4, 5, 6]);
 
@@ -480,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn should_merged_props_remove() {
-        let mut val = MergedPropsValue::default();
+    fn should_packed_props_remove() {
+        let mut val = PackedProps::default();
         val.set(1, Bytes::from_static(&[1]));
         val.set(2, Bytes::from_static(&[2]));
         val.remove(1);
@@ -490,34 +481,34 @@ mod tests {
     }
 
     #[test]
-    fn should_merged_props_reject_truncated() {
-        assert!(MergedPropsValue::decode(&[0, 0]).is_err());
-        assert!(MergedPropsValue::decode(&[1, 0, 0, 0]).is_err());
+    fn should_packed_props_reject_truncated() {
+        assert!(PackedProps::decode(&[0, 0]).is_err());
+        assert!(PackedProps::decode(&[1, 0, 0, 0]).is_err());
     }
 
-    // --- MergedAdjValue tests ---
+    // --- PackedAdj tests ---
 
     #[test]
-    fn should_roundtrip_merged_adj_value() {
-        let val = MergedAdjValue {
+    fn should_roundtrip_packed_adj() {
+        let val = PackedAdj {
             entries: vec![(10, 100), (20, 200), (30, 300)],
         };
         let encoded = val.encode();
-        let decoded = MergedAdjValue::decode(&encoded).unwrap();
+        let decoded = PackedAdj::decode(&encoded).unwrap();
         assert_eq!(decoded, val);
     }
 
     #[test]
-    fn should_roundtrip_merged_adj_value_empty() {
-        let val = MergedAdjValue::default();
+    fn should_roundtrip_packed_adj_empty() {
+        let val = PackedAdj::default();
         let encoded = val.encode();
-        let decoded = MergedAdjValue::decode(&encoded).unwrap();
+        let decoded = PackedAdj::decode(&encoded).unwrap();
         assert_eq!(decoded, val);
     }
 
     #[test]
-    fn should_merged_adj_add_and_remove() {
-        let mut val = MergedAdjValue::default();
+    fn should_packed_adj_add_and_remove() {
+        let mut val = PackedAdj::default();
         val.add(10, 100);
         val.add(20, 200);
         assert_eq!(val.entries.len(), 2);
@@ -532,10 +523,10 @@ mod tests {
     }
 
     #[test]
-    fn should_merged_adj_reject_truncated() {
-        assert!(MergedAdjValue::decode(&[0, 0]).is_err());
+    fn should_packed_adj_reject_truncated() {
+        assert!(PackedAdj::decode(&[0, 0]).is_err());
         // Claims 1 entry but insufficient data
-        assert!(MergedAdjValue::decode(&[1, 0, 0, 0]).is_err());
+        assert!(PackedAdj::decode(&[1, 0, 0, 0]).is_err());
     }
 
     // --- Merge operand encoding tests ---

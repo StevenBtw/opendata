@@ -97,6 +97,10 @@ impl Catalog {
         self.edge_types.get_name(id)
     }
 
+    pub fn get_edge_type_id(&self, name: &str) -> Option<u32> {
+        self.edge_types.get_id(name)
+    }
+
     pub fn edge_type_count(&self) -> usize {
         self.edge_types.len()
     }

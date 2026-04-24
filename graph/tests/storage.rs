@@ -714,6 +714,122 @@ async fn statistics_reflect_counts() {
     assert_eq!(stats.total_edges, 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn label_cardinality_tracks_creates_deletes_and_label_ops() {
+    let db = setup().await;
+    let s = store(&db);
+
+    // 3 Person + 1 Org + 1 Person+Org; delete 1 Person; add Person to Org-only node.
+    s.create_node(&["Person"]);
+    s.create_node(&["Person"]);
+    let to_delete = s.create_node(&["Person"]);
+    let org_only = s.create_node(&["Org"]);
+    let both = s.create_node(&["Person", "Org"]);
+
+    s.delete_node(to_delete);
+
+    assert_eq!(s.estimate_label_cardinality("Person"), 3.0);
+    assert_eq!(s.estimate_label_cardinality("Org"), 2.0);
+    assert_eq!(
+        s.estimate_label_cardinality("Missing"),
+        0.0,
+        "unknown label returns 0"
+    );
+
+    s.add_label(org_only, "Person");
+    assert_eq!(s.estimate_label_cardinality("Person"), 4.0);
+
+    s.remove_label(both, "Person");
+    assert_eq!(s.estimate_label_cardinality("Person"), 3.0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn avg_degree_is_per_edge_type() {
+    let db = setup().await;
+    let s = store(&db);
+
+    // 10 nodes. 20 KNOWS edges fan out from nodes[0]; 2 OWNS edges from nodes[1].
+    // Per-type avg degree should differ sharply.
+    let nodes: Vec<_> = (0..10).map(|_| s.create_node(&[])).collect();
+
+    for i in 1..10 {
+        s.create_edge(nodes[0], nodes[i], "KNOWS");
+        s.create_edge(nodes[i], nodes[0], "KNOWS");
+    }
+    // That's 18 KNOWS edges. Add 2 more so KNOWS=20.
+    s.create_edge(nodes[0], nodes[1], "KNOWS");
+    s.create_edge(nodes[0], nodes[2], "KNOWS");
+
+    s.create_edge(nodes[1], nodes[2], "OWNS");
+    s.create_edge(nodes[1], nodes[3], "OWNS");
+
+    // 10 nodes, 20 KNOWS, 2 OWNS. Global avg would be 22/10 = 2.2 for both.
+    // Per-type should give KNOWS=2.0 and OWNS=0.2.
+    let knows = s.estimate_avg_degree("KNOWS", true);
+    let owns = s.estimate_avg_degree("OWNS", true);
+
+    assert!(
+        (knows - 2.0).abs() < 1e-9,
+        "KNOWS avg degree should be 20/10=2.0, got {knows}"
+    );
+    assert!(
+        (owns - 0.2).abs() < 1e-9,
+        "OWNS avg degree should be 2/10=0.2, got {owns}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn per_type_counters_track_deletes() {
+    let db = setup().await;
+    let s = store(&db);
+
+    let a = s.create_node(&[]);
+    let b = s.create_node(&[]);
+    let c = s.create_node(&[]);
+
+    let e1 = s.create_edge(a, b, "KNOWS");
+    let _e2 = s.create_edge(b, c, "KNOWS");
+    let e3 = s.create_edge(a, c, "OWNS");
+
+    // Baseline: 3 nodes, 2 KNOWS, 1 OWNS
+    assert!((s.estimate_avg_degree("KNOWS", true) - 2.0 / 3.0).abs() < 1e-9);
+    assert!((s.estimate_avg_degree("OWNS", true) - 1.0 / 3.0).abs() < 1e-9);
+
+    s.delete_edge(e1);
+    s.delete_edge(e3);
+
+    // After deletes: 3 nodes, 1 KNOWS, 0 OWNS
+    assert!((s.estimate_avg_degree("KNOWS", true) - 1.0 / 3.0).abs() < 1e-9);
+    assert_eq!(
+        s.estimate_avg_degree("OWNS", true),
+        0.0,
+        "OWNS counter should be zero after deleting its only edge"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cascade_delete_decrements_per_type_counters() {
+    let db = setup().await;
+    let s = store(&db);
+
+    let hub = s.create_node(&["Person"]);
+    let a = s.create_node(&[]);
+    let b = s.create_node(&[]);
+
+    s.create_edge(hub, a, "KNOWS");
+    s.create_edge(hub, b, "KNOWS");
+    s.create_edge(a, hub, "OWNS");
+
+    // Deleting `hub` cascades all its connected edges (2 KNOWS + 1 OWNS).
+    s.delete_node(hub);
+
+    // Labels on the deleted node should also be removed from per-label counts.
+    assert_eq!(s.estimate_label_cardinality("Person"), 0.0);
+    assert_eq!(s.estimate_avg_degree("KNOWS", true), 0.0);
+    assert_eq!(s.estimate_avg_degree("OWNS", true), 0.0);
+    assert_eq!(s.edge_count(), 0, "all edges should be gone after cascade");
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Layer 3: Behavioral Invariants
 // ═══════════════════════════════════════════════════════════════════════

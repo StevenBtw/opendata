@@ -46,9 +46,20 @@ lite = ["gql"]
 full = ["all-languages", "rdf", "algos", "gwp", "bolt"]
 
 [dependencies]
-grafeo-engine = { version = "0.5.30", default-features = false, optional = true }
-grafeo-core = { version = "0.5.30", default-features = false }
-grafeo-common = { version = "0.5.30" }
+# Grafeo dependencies are deliberately kept feature-minimal.
+#
+# We do NOT enable grafeo's `lpg` feature: it compiles Grafeo's in-memory
+# `LpgStore`, the `section` block store, and the compact graph codec — all
+# dead code for us, because RFC 0006 implements `GraphStore`/`GraphStoreMut`
+# directly over SlateDB. The trait definitions and the `Edge`/`Node`/
+# `CompareOp` types we depend on live outside the `lpg` cfg in 0.5.40.
+#
+# `grafeo-engine` is optional and only pulled in when a query-language
+# feature (gql, cypher, ...) is enabled. Each language feature forwards to
+# the matching engine feature, which in turn activates grafeo-adapters.
+grafeo-engine = { version = "0.5.40", default-features = false, optional = true }
+grafeo-core = { version = "0.5.40", default-features = false }
+grafeo-common = { version = "0.5.40" }
 common.workspace = true
 bytes.workspace = true
 tokio.workspace = true
@@ -59,7 +70,7 @@ thiserror.workspace = true
 tracing.workspace = true
 dashmap.workspace = true
 parking_lot = "0.12"
-hashbrown = "0.16"
+hashbrown = "0.17"
 arcstr = "1.2"
 smallvec = "1.15"
 
@@ -88,8 +99,4 @@ tower.workspace = true
 
 [[bench]]
 name = "storage"
-harness = false
-
-[[bench]]
-name = "layout_comparison"
 harness = false

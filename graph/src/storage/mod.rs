@@ -12,7 +12,7 @@ use common::storage::{Storage, StorageError};
 use tokio::runtime::Handle;
 use tracing::info;
 
-use crate::config::{Config, StorageLayout};
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::serde::keys::{MetadataKey, SequenceKey};
 use crate::serde::{MetadataSubType, SequenceKind};
@@ -33,7 +33,6 @@ pub struct GraphStorage {
     edge_seq: Mutex<SequenceAllocator>,
     node_count: AtomicI64,
     edge_count: AtomicI64,
-    storage_layout: StorageLayout,
 }
 
 impl GraphStorage {
@@ -41,7 +40,7 @@ impl GraphStorage {
     ///
     /// Loads catalog, metadata counters, and sequence allocators from existing
     /// data, or initializes them for a fresh database.
-    pub async fn new(storage: Arc<dyn Storage>, config: &Config) -> Result<Self> {
+    pub async fn new(storage: Arc<dyn Storage>, _config: &Config) -> Result<Self> {
         let rt = Handle::current();
 
         // Load sequence allocators
@@ -78,7 +77,6 @@ impl GraphStorage {
             edge_seq: Mutex::new(edge_seq),
             node_count: AtomicI64::new(node_count),
             edge_count: AtomicI64::new(edge_count),
-            storage_layout: config.storage_layout,
         })
     }
 
@@ -119,33 +117,27 @@ impl GraphStorage {
         Err(Error::Internal("transaction retries exhausted".to_string()))
     }
 
-    /// Loads merged node properties from storage, returning the decoded blob.
-    pub(crate) fn load_merged_node_props(
-        &self,
-        node_id: u64,
-    ) -> crate::serde::values::MergedPropsValue {
-        use crate::serde::keys::MergedNodePropsKey;
-        use crate::serde::values::MergedPropsValue;
+    /// Loads packed node properties from storage, returning the decoded blob.
+    pub(crate) fn load_node_props(&self, node_id: u64) -> crate::serde::values::PackedProps {
+        use crate::serde::keys::NodePropsKey;
+        use crate::serde::values::PackedProps;
 
-        let key = MergedNodePropsKey { node_id }.encode();
+        let key = NodePropsKey { node_id }.encode();
         match self.exec(async { self.storage.get(key).await }) {
-            Ok(Some(record)) => MergedPropsValue::decode(&record.value).unwrap_or_default(),
-            _ => MergedPropsValue::default(),
+            Ok(Some(record)) => PackedProps::decode(&record.value).unwrap_or_default(),
+            _ => PackedProps::default(),
         }
     }
 
-    /// Loads merged edge properties from storage, returning the decoded blob.
-    pub(crate) fn load_merged_edge_props(
-        &self,
-        edge_id: u64,
-    ) -> crate::serde::values::MergedPropsValue {
-        use crate::serde::keys::MergedEdgePropsKey;
-        use crate::serde::values::MergedPropsValue;
+    /// Loads packed edge properties from storage, returning the decoded blob.
+    pub(crate) fn load_edge_props(&self, edge_id: u64) -> crate::serde::values::PackedProps {
+        use crate::serde::keys::EdgePropsKey;
+        use crate::serde::values::PackedProps;
 
-        let key = MergedEdgePropsKey { edge_id }.encode();
+        let key = EdgePropsKey { edge_id }.encode();
         match self.exec(async { self.storage.get(key).await }) {
-            Ok(Some(record)) => MergedPropsValue::decode(&record.value).unwrap_or_default(),
-            _ => MergedPropsValue::default(),
+            Ok(Some(record)) => PackedProps::decode(&record.value).unwrap_or_default(),
+            _ => PackedProps::default(),
         }
     }
 }

@@ -98,6 +98,7 @@ fn grafeo_value_to_json(v: &grafeo_common::types::Value) -> serde_json::Value {
             let total_neg: u64 = neg.values().sum();
             serde_json::json!(total_pos as i64 - total_neg as i64)
         }
+        _ => serde_json::Value::Null,
     }
 }
 
